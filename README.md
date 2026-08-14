@@ -36,13 +36,13 @@ flowchart LR
     end
 
     subgraph cloud["☁️ Growatt cloud"]
-        G["server.growatt.com"]
+        G(["server.growatt.com"])
     end
 
     subgraph home["🏠 Home automation"]
         direction TB
         M[("📨 MQTT broker")]
-        HA["Home Assistant"]
+        HA{{"Home Assistant"}}
         M --> HA
     end
 
@@ -64,6 +64,10 @@ flowchart LR
     style host fill:transparent,stroke:#3fb950,stroke-dasharray:4 4
     style cloud fill:transparent,stroke:#a371f7,stroke-dasharray:4 4
     style home fill:transparent,stroke:#f0883e,stroke-dasharray:4 4
+    linkStyle 0,1 stroke:#58a6ff,stroke-width:2px
+    linkStyle 3,4 stroke:#3fb950,stroke-width:3px
+    linkStyle 5,6 stroke:#a371f7,stroke-width:2px
+    linkStyle 2,7 stroke:#f0883e,stroke-width:2px
 ```
 
 ## Credits & scope
@@ -121,25 +125,34 @@ Record lifecycle, including the degraded modes:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant DL as 📡 ShineLink-X
-    participant PX as 🛡️ grott-minx
-    participant GW as ☁️ Growatt cloud
-    participant MQ as 📨 MQTT broker
+    box rgba(31,111,235,0.12) 🏠 Local network
+        participant DL as 📡 ShineLink-X
+        participant PX as 🛡️ grott-minx
+        participant MQ as 📨 MQTT broker
+    end
+    box rgba(137,87,229,0.12) 🌐 Internet
+        participant GW as ☁️ Growatt cloud
+    end
 
     DL->>PX: Data record 04 (XOR-masked, CRC16)
+    activate PX
     alt Growatt reachable — normal proxy mode
         PX->>GW: Raw passthrough (byte-for-byte)
         PX->>MQ: Decoded JSON
         GW-->>PX: ACK
         PX-->>DL: ACK relayed
     else Growatt down (offline fallback) or noforward
-        PX-->>DL: Local ACK crafted by the proxy
-        PX->>MQ: Decoded JSON
+        rect rgba(35,134,54,0.15)
+            PX-->>DL: Local ACK crafted by the proxy
+            PX->>MQ: Decoded JSON — metrics keep flowing
+        end
     end
+    deactivate PX
     opt blockcmd enabled
         GW->>PX: Remote register command (05/06/10/18/19)
-        Note over PX,DL: Dropped by the proxy — never reaches the datalogger
+        Note over DL,PX: ⛔ Dropped — never reaches the datalogger
     end
+    Note over MQ: 🏡 Home Assistant sensors update
 ```
 
 ### Protocol notes
