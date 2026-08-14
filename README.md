@@ -102,6 +102,32 @@ a background daemon thread with automatic reconnection and exponential backoff. 
 the broker is unreachable, `publish()` fails fast (bounded by `publishtimeout`) and the
 proxy keeps relaying — an MQTT outage never blocks inverter traffic.
 
+Record lifecycle, including the degraded modes:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DL as 📡 ShineLink-X
+    participant PX as 🛡️ grott-minx
+    participant GW as ☁️ Growatt cloud
+    participant MQ as 📨 MQTT broker
+
+    DL->>PX: Data record 04 (XOR-masked, CRC16)
+    alt Growatt reachable — normal proxy mode
+        PX->>GW: Raw passthrough (byte-for-byte)
+        PX->>MQ: Decoded JSON
+        GW-->>PX: ACK
+        PX-->>DL: ACK relayed
+    else Growatt down (offline fallback) or noforward
+        PX-->>DL: Local ACK crafted by the proxy
+        PX->>MQ: Decoded JSON
+    end
+    opt blockcmd enabled
+        GW->>PX: Remote register command (05/06/10/18/19)
+        Note over PX,DL: Dropped by the proxy — never reaches the datalogger
+    end
+```
+
 ### Protocol notes
 
 - Record header: 8 bytes — `seq(2) | protocol(2) | length(2) | deviceno(1) | rectype(1)`.
