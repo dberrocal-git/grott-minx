@@ -3,6 +3,7 @@
 import configparser
 import logging
 import os
+import socket
 import sys
 
 from grottdata import shutdown_mqtt
@@ -52,6 +53,26 @@ addLoggingLevel("DEBUGV", logging.DEBUG - 5)
 
 logger = logging.getLogger(__name__)
 
+
+def detect_local_ip():
+    """Returns the IPv4 address of the primary outbound interface.
+
+    Used as the default listen address so the proxy binds to one dedicated
+    interface instead of every interface. The UDP socket sends no packets, it
+    only asks the kernel which local address would be used for a route.
+
+    Returns:
+        The local IPv4 address, or ``"127.0.0.1"`` when it cannot be determined.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 9))  # RFC 5737 TEST-NET-1, never contacted.
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
 logger.info("grott-minx started")
 
 
@@ -62,7 +83,7 @@ class GrottConf:
         """Loads defaults, applies ``grott.ini`` overrides and builds the layouts."""
         self.loglevel = "INFO"
         self.grottport = 5279
-        self.grottip = "0.0.0.0"
+        self.grottip = detect_local_ip()
         self.growattip = "47.254.130.145"
         self.growattport = 5279
         self.mqttip = "localhost"

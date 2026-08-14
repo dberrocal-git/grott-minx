@@ -6,8 +6,11 @@
 ; DEBUG also hex-dumps every Growatt record received.
 loglevel = INFO
 ; address and port the proxy listens on for datalogger connections
-; (0.0.0.0 = all interfaces; point the datalogger here instead of server.growatt.com)
-grottip = 0.0.0.0
+; (point the datalogger here instead of server.growatt.com). Set the IP of the
+; LAN interface the datalogger reaches; when omitted, the primary outbound
+; interface is detected automatically. Avoid 0.0.0.0: it exposes the listener
+; on every interface.
+grottip = 192.168.1.10
 grottport = 5279
 ; True: publish every field defined in the record layout.
 ; False: publish only the fields marked "include" in the layout.
