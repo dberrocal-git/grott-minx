@@ -6,6 +6,20 @@ and `server.growatt.com`. All traffic is relayed byte-for-byte in both direction
 inverter and smart-meter records are decoded on the fly and published as JSON to an MQTT
 broker (e.g. for Home Assistant) — no cloud polling, no official API, near-realtime data.
 
+Designed for local resilience and for keeping the cloud's hands off your hardware:
+
+- **Metrics survive cloud outages.** If the Growatt server is unreachable (internet
+  down, cloud maintenance), the proxy acknowledges the datalogger itself and MQTT
+  keeps receiving data — offline fallback is on by default, and `noforward` runs the
+  whole thing 100% cloud-free.
+- **Security-minded.** `blockcmd` drops remote register read/write commands, so the
+  inverter and datalogger cannot be reconfigured from the outside while monitoring
+  continues untouched; CRC-failing records are relayed but never published, and
+  credentials/serials stay out of the repository.
+- **Built to survive.** Non-blocking relay with per-connection buffering, TCP
+  keepalive, MQTT auto-reconnection, and a supervised service with automatic respawn
+  and a port health check.
+
 ```mermaid
 flowchart LR
     subgraph plant["☀️ Solar plant"]
