@@ -1,6 +1,7 @@
 # grott-minx — Growatt inverter monitor (TCP proxy → MQTT)
 
-Transparent TCP proxy that sits between a Growatt datalogger (ShineWiFi/ShineLAN stick)
+Transparent TCP proxy that sits between a Growatt datalogger (ShineLink-X in this
+setup; ShineWiFi/ShineLAN sticks speak the same protocol)
 and `server.growatt.com`. All traffic is relayed byte-for-byte in both directions while
 inverter and smart-meter records are decoded on the fly and published as JSON to an MQTT
 broker (e.g. for Home Assistant) — no cloud polling, no official API, near-realtime data.
@@ -17,11 +18,16 @@ flowchart LR
 
 Based on [johanmeijer/grott](https://github.com/johanmeijer/grott) — all credit for the
 original protocol reverse-engineering and record layouts goes to that project. This
-repository is a heavily trimmed and hardened rewrite targeting one specific setup:
+repository is a heavily trimmed and hardened rewrite targeting one specific setup,
+listed below with the exact firmware versions it is tested against — if you run this
+same combination, everything here should work out of the box:
 
-- **Inverter:** Growatt MIN 6000TL-XH
-- **Battery:** Growatt APX V1
-- **Datalogger:** ShineLink-X
+| Component | Model | Tested firmware / software |
+|---|---|---|
+| Inverter | Growatt MIN 6000TL-XH | `AL1.0` / `ALBA180701` / `ZABA-0023` |
+| Battery | Growatt APX V1 | General controller BMS: monitoring `ZECA-11`, control `VDAA-11` — battery modules: BMS `QABA-11`, control `WAAA-11` |
+| Datalogger | ShineLink-X | RF stick `7.4.1.4` — ShineLink-X `7.0.2.5` |
+| Smart meter | Eastron SDM230 (Modbus) | Read through the Growatt datalogger (record types `20`/`1b`) |
 
 Generic multi-inverter support, other operating modes and the unused record layouts
 from upstream were deliberately removed. If your hardware differs, expect to bring
