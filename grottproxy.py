@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 known_protocols = (0x00, 0x02, 0x05, 0x06)
 # Register read/write record types the Growatt server may send towards the datalogger/inverter.
 blocked_rectypes = (0x05, 0x06, 0x10, 0x18, 0x19)
+# Record types observed (ShineLink-X 7.x) to carry an undeclared encrypted trailer after the frame.
+trailer_rectypes = (0x29, 0x38)
 
 
 def calc_crc(data):
@@ -57,6 +59,20 @@ def build_ack(record):
         ack = prefix + b"\x47"  # Ack byte 0x00 XOR-masked with the "G" of "Growatt".
         return ack + calc_crc(ack).to_bytes(2, "big")
     return prefix + b"\x00"
+
+
+def find_next_header(buf):
+    """Returns the offset of the next plausible record header in *buf*, or -1.
+
+    A plausible header has a zero protocol high byte, a known protocol id and a
+    sane declared length. The CRC check downstream weeds out false positives.
+    """
+    for i in range(1, len(buf) - 7):
+        if buf[i + 2] == 0x00 and buf[i + 3] in known_protocols:
+            length = int.from_bytes(buf[i + 4 : i + 6], "big")
+            if 0 < length <= 4096:
+                return i
+    return -1
 
 
 def set_keepalive(sock, idle, interval, count):
@@ -353,17 +369,30 @@ class Proxy:
             datalength = int.from_bytes(buf[4:6], "big")
 
             if protocol not in known_protocols or datalength == 0:
-                origin = "server" if sock in self.serverside else "datalogger"
+                nxt = find_next_header(buf)
+                skipped = buf[:nxt] if nxt != -1 else buf
                 last = self.lastrec.get(sock)
-                lastinfo = f"after record type {last[0]:02x}/proto {last[1]:02x}/{last[2]}B" if last else "at stream start"
-                logger.warning(
-                    "Unrecognized data stream from %s (%s): %d byte(s) dropped, head: %s",
-                    origin, lastinfo, len(buf), buf[:32].hex(),
-                )
+                if last and last[0] in trailer_rectypes:
+                    # Known firmware quirk: these records carry an undeclared encrypted trailer.
+                    logger.debug("Skipped %d trailer byte(s) after type-%02x record", len(skipped), last[0])
+                else:
+                    origin = "server" if sock in self.serverside else "datalogger"
+                    lastinfo = (
+                        f"after record type {last[0]:02x}/proto {last[1]:02x}/{last[2]}B" if last else "at stream start"
+                    )
+                    logger.warning(
+                        "Unrecognized data stream from %s (%s): %d byte(s) skipped, head: %s",
+                        origin, lastinfo, len(skipped), skipped[:32].hex(),
+                    )
                 if filtering:
-                    self.queue_send(peer, buf)  # Fail open: an unparseable stream is never withheld.
-                buf = b""
-                break
+                    self.queue_send(peer, skipped)  # Fail open: an unparseable stream is never withheld.
+                    if sock not in self.channel:
+                        return
+                if nxt == -1:
+                    buf = b""
+                    break
+                buf = buf[nxt:]  # Resume parsing at the recovered header.
+                continue
 
             if protocol in (0x05, 0x06):
                 reclength = datalength + 8

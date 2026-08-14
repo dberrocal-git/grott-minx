@@ -310,6 +310,34 @@ def test_growatt_down_fallback():
     grottproxy.procdata = orig
 
 
+def test_resync_after_trailer():
+    """A record following an undeclared trailer in the same chunk is recovered."""
+    rec1 = make_record(0x41, rectype=0x04, total_len=600)
+    trailer = b"\xff" * 40  # no plausible header inside
+    rec2 = make_record(0x42, rectype=0x04, total_len=600)
+    stream = rec1 + trailer + rec2
+
+    calls = []
+    orig = grottproxy.procdata
+    grottproxy.procdata = lambda conf, data: calls.append(len(data))
+
+    conf = make_conf(grottport=PROXY_PORT + 4, noforward=True)
+    proxy = Proxy(conf)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 4), timeout=10)
+    client.settimeout(10)
+    client.sendall(stream)
+    wait_for(lambda: len(calls) >= 2)
+    client.close()
+    time.sleep(0.3)
+    proxy.shutdown()
+    grottproxy.procdata = orig
+
+    check("scan-resync recovers the record after an unparseable trailer", calls == [600, 600], f"calls={calls}")
+
+
 def test_mqtt():
     """Publishes through a fake broker and fails fast when no broker listens."""
     got = {"raw": b""}
@@ -363,6 +391,7 @@ if __name__ == "__main__":
     test_blockcmd()
     test_noforward()
     test_growatt_down_fallback()
+    test_resync_after_trailer()
     test_mqtt()
     print("RESULT:", "ALL TESTS PASSED" if not FAILURES else f"FAILED: {FAILURES}")
     sys.exit(1 if FAILURES else 0)
