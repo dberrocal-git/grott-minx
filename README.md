@@ -8,10 +8,48 @@ broker (e.g. for Home Assistant) — no cloud polling, no official API, near-rea
 
 ```mermaid
 flowchart LR
-    D[Growatt datalogger] -- TCP 5279 --> P[grott proxy]
-    P -- raw passthrough --> G[server.growatt.com:5279]
-    G -- ACKs / commands --> P -- relayed --> D
-    P -- decoded JSON --> M[(MQTT broker)]
+    subgraph plant["☀️ Solar plant"]
+        direction TB
+        INV["⚡ MIN 6000TL-XH<br/>+ APX battery"]
+        SM["🔌 Eastron SDM230"]
+        DL["📡 ShineLink-X"]
+        INV -- "RF link" --> DL
+        SM -- "Modbus" --> DL
+    end
+
+    subgraph host["🖥️ Proxy host (LAN)"]
+        P["🛡️ grott-minx<br/>:5279"]
+    end
+
+    subgraph cloud["☁️ Growatt cloud"]
+        G["server.growatt.com"]
+    end
+
+    subgraph home["🏠 Home automation"]
+        direction TB
+        M[("📨 MQTT broker")]
+        HA["Home Assistant"]
+        M --> HA
+    end
+
+    DL ==>|"XOR-masked records<br/>TCP :5279"| P
+    P ==>|"raw passthrough<br/>(offline fallback: local ACKs)"| G
+    G -.->|"ACKs · remote commands"| P
+    P -.->|"relayed · blockcmd filter"| DL
+    P ==>|"decoded JSON"| M
+
+    classDef device fill:#1f6feb,stroke:#58a6ff,color:#fff,stroke-width:1px
+    classDef proxy fill:#238636,stroke:#3fb950,color:#fff,stroke-width:2px
+    classDef cloudn fill:#8957e5,stroke:#a371f7,color:#fff
+    classDef homen fill:#e3650d,stroke:#f0883e,color:#fff
+    class INV,SM,DL device
+    class P proxy
+    class G cloudn
+    class M,HA homen
+    style plant fill:transparent,stroke:#58a6ff,stroke-dasharray:4 4
+    style host fill:transparent,stroke:#3fb950,stroke-dasharray:4 4
+    style cloud fill:transparent,stroke:#a371f7,stroke-dasharray:4 4
+    style home fill:transparent,stroke:#f0883e,stroke-dasharray:4 4
 ```
 
 ## Credits & scope
