@@ -28,7 +28,7 @@ flowchart LR
         SM["🔌 Eastron SDM230"]
         DL["📡 ShineLink-X"]
         INV -- "RF link" --> DL
-        SM -- "Modbus" --> DL
+        SM -- "Modbus" --> INV
     end
 
     subgraph host["🖥️ Proxy host (LAN)"]
@@ -83,7 +83,14 @@ same combination, everything here should work out of the box:
 | Inverter | Growatt MIN 6000TL-XH | `AL1.0` / `ALBA180701` / `ZABA-0023` |
 | Battery | Growatt APX V1 | General controller BMS: monitoring `ZECA-11`, control `VDAA-11` — battery modules: BMS `QABA-11`, control `WAAA-11` |
 | Datalogger | ShineLink-X | RF stick `7.4.1.4` — ShineLink-X `7.0.2.5` |
-| Smart meter | Eastron SDM230 (Modbus) | Read through the Growatt datalogger (record types `20`/`1b`) |
+| Smart meter | Eastron SDM230 (Modbus RS485 to the inverter) | Reported through the datalogger as record types `20`/`1b` |
+
+> [!NOTE]
+> The smart meter is wired to the **inverter** over Modbus (RS485); the inverter/
+> datalogger then reports its readings as generic smart-meter records (`20`/`1b`).
+> Because this proxy decodes those records — not the meter itself — **any
+> Growatt-compatible meter should work the same way**; the SDM230 is simply the
+> one this setup is tested with.
 
 Generic multi-inverter support, other operating modes and the unused record layouts
 from upstream were deliberately removed. If your hardware differs, expect to bring
