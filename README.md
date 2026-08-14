@@ -326,10 +326,10 @@ inverter stops reporting (e.g. overnight).
 ## Development
 
 ```sh
-uvx ruff check *.py                    # lint (rules & documented ignores in pyproject.toml)
-uv run --with pylint pylint *.py       # pylint (config in pyproject.toml)
-uv run python tests/test_smoke.py      # end-to-end smoke test (fake datalogger, Growatt server and MQTT broker)
-uv lock --upgrade-package paho-mqtt && uv sync && uv export --no-hashes -o requirements.txt
+uv run ruff check *.py tests/         # lint (version pinned in uv.lock; rules in pyproject.toml)
+uv run pylint *.py                    # pylint (pinned; config in pyproject.toml)
+uv run python tests/test_smoke.py     # end-to-end smoke test (fake datalogger, Growatt server and MQTT broker)
+uv lock --upgrade-package paho-mqtt && uv sync && uv export --no-dev --no-hashes -o requirements.txt
 ```
 
 CI (GitHub Actions) runs ruff, pylint and the smoke test on every push/PR.

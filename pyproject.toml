@@ -52,3 +52,9 @@ disable = [
     "broad-exception-caught",
     "global-statement",
 ]
+
+[dependency-groups]
+dev = [
+    "pylint>=4.0.7",
+    "ruff>=0.16.3",
+]
