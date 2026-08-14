@@ -233,6 +233,26 @@ health check has no built-in systemd equivalent; replicate it with a systemd tim
 that probes the port and restarts the unit, or rely on the relay's own hang
 protections (non-blocking I/O + TCP keepalive).
 
+## Home Assistant integration
+
+[`examples/growatt.yaml.example`](examples/growatt.yaml.example) provides a ready-made
+set of MQTT sensor definitions covering the inverter, the APX battery (BDC/BMS
+entities) and the Eastron SDM230 smart meter, mapping the raw `values` payload to
+scaled Home Assistant entities.
+
+1. Copy it to your Home Assistant configuration as `mqtt_sensors/growatt.yaml`.
+2. Replace the `<INVERTER_SERIAL>` and `<DATALOGGER_SERIAL>` placeholders with your
+   serials (visible as the `device` field of the published MQTT payload).
+3. Include the folder from `configuration.yaml`:
+
+   ```yaml
+   mqtt:
+     sensor: !include_dir_merge_list mqtt_sensors
+   ```
+
+Most sensors use `expire_after: 120`, so entities become `unavailable` when the
+inverter stops reporting (e.g. overnight).
+
 ## Development
 
 ```sh

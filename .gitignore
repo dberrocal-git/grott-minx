@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 # real config holds MQTT credentials; use grott.ini.example as template
 grott.ini
+# working HA sensor config holds real device serials; use examples/growatt.yaml.example
+growatt.yaml

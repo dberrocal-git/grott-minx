@@ -1,0 +1,1349 @@
+# Home Assistant MQTT sensors for grott-minx.
+#
+# Devices covered:
+# - Growatt MIN 6000TL-XH inverter (+ APX battery: BDC/BMS entities)
+# - Eastron SDM230 smart meter (via Growatt Raillog / datalogger)
+#
+# Usage:
+# 1. Copy this file to your Home Assistant config as mqtt_sensors/growatt.yaml.
+# 2. Replace <INVERTER_SERIAL> and <DATALOGGER_SERIAL> with your own serials
+#    (they appear as the "device" field of the MQTT payload published by grott-minx,
+#    or in its DEBUG logs).
+# 3. Include the folder from configuration.yaml:
+#
+#      mqtt:
+#        sensor: !include_dir_merge_list mqtt_sensors
+#
+# Values arrive as raw registers; the value_templates below apply the scale factors.
+
+################################
+# INVERSOR GROWATT - ESTADO    #
+################################
+
+# Estado del inversor
+- state_topic: "energy/growatt"
+  unique_id: "inverter_status"
+  name: "Status"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvstatus'] }}
+    {% endif %}
+  icon: "mdi:information-outline"
+  expire_after: 120
+  state_class: "measurement"
+  device: &growatt_device
+    identifiers: ["<INVERTER_SERIAL>-2"]
+    name: "Growatt Inverter"
+    manufacturer: "Growatt"
+    model: "MIN 6000TL-XH"
+
+# Código de fallo
+- state_topic: "energy/growatt"
+  unique_id: "fault_code"
+  name: "Fault Code"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['faultcode'] }}
+    {% endif %}
+  icon: "mdi:alert-circle"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Código de advertencia
+- state_topic: "energy/growatt"
+  unique_id: "warning_code"
+  name: "Warning Code"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['warningcode'] }}
+    {% endif %}
+  icon: "mdi:alert"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Tiempo de trabajo total
+- state_topic: "energy/growatt"
+  unique_id: "total_working_time"
+  name: "Total Working Time"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ (value_json['values']['totworktime'] | int * 0.5) / 3600 }}
+    {% endif %}
+  unit_of_measurement: "h"
+  device_class: "duration"
+  state_class: "total_increasing"
+  icon: "mdi:clock-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# Estado BDC On/Off
+- state_topic: "energy/growatt"
+  unique_id: "inverter_bdc_onoff_state"
+  name: "BDC On/Off State"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdconoffstate'] }}
+    {% endif %}
+  icon: "mdi:toggle-switch"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Estado del contacto seco
+- state_topic: "energy/growatt"
+  unique_id: "inverter_drycontact_state"
+  name: "Dry Contact State"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['drycontactstate'] }}
+    {% endif %}
+  icon: "mdi:electric-switch"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Prioridad de operación
+- state_topic: "energy/growatt"
+  unique_id: "inverter_priority"
+  name: "Operating Priority"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['priority'] }}
+    {% endif %}
+  icon: "mdi:priority-high"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Standby Flag
+- state_topic: "energy/growatt"
+  unique_id: "inverter_standby_flag"
+  name: "Standby Status"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['standbyflag'] }}
+    {% endif %}
+  icon: "mdi:sleep"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Derating Mode
+- state_topic: "energy/growatt"
+  unique_id: "inverter_derating_mode"
+  name: "Derating Mode"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['deratingmode'] }}
+    {% endif %}
+  icon: "mdi:tune"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Tiempo de inicio retardado del inversor
+- state_topic: "energy/growatt"
+  unique_id: "inverter_startdelaytime"
+  name: "Inverter Start Delay Time"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['invstartdelaytime'] }}
+    {% endif %}
+  unit_of_measurement: "s"
+  device_class: "duration"
+  state_class: "measurement"
+  icon: "mdi:timer-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# Porcentaje de operación real
+- state_topic: "energy/growatt"
+  unique_id: "inverter_realoppercent"
+  name: "Operation Percentage"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['realoppercent'] }}
+    {% endif %}
+  unit_of_measurement: "%"
+  state_class: "measurement"
+  icon: "mdi:percent"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# INVERSOR - TEMPERATURA       #
+################################
+
+# Temperatura del inversor
+- state_topic: "energy/growatt"
+  unique_id: "inverter_temperature"
+  name: "Inverter Temperature"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvtemperature'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "°C"
+  device_class: "temperature"
+  state_class: "measurement"
+  icon: "mdi:thermometer"
+  expire_after: 120
+  device: *growatt_device
+
+# Temperatura interna del inversor
+- state_topic: "energy/growatt"
+  unique_id: "inverter_internal_temperature"
+  name: "IPM Temperature"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvipmtemperature'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "°C"
+  device_class: "temperature"
+  state_class: "measurement"
+  icon: "mdi:server-network"
+  expire_after: 120
+  device: *growatt_device
+
+# Temperatura del componente (temp5)
+- state_topic: "energy/growatt"
+  unique_id: "inverter_temp5"
+  name: "Inverter Temperature 5"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['temp5'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "°C"
+  device_class: "temperature"
+  state_class: "measurement"
+  icon: "mdi:thermometer"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# PANELES SOLARES (PV)        #
+################################
+
+# Potencia de entrada solar (DC)
+- state_topic: "energy/growatt"
+  unique_id: "inverter_pv_power_in"
+  name: "PV-All Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvpowerin'] | float / 10}}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:solar-power"
+  expire_after: 120
+  device: *growatt_device
+
+# Voltaje PV1
+- state_topic: "energy/growatt"
+  unique_id: "inverter_pv1_voltage"
+  name: "PV1 Voltage"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pv1voltage'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:lightning-bolt"
+  expire_after: 120
+  device: *growatt_device
+
+# Corriente PV1
+- state_topic: "energy/growatt"
+  unique_id: "inverter_pv1_current"
+  name: "PV1 Current"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pv1current'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "A"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:current-dc"
+  expire_after: 120
+  device: *growatt_device
+
+# Potencia PV1
+- state_topic: "energy/growatt"
+  unique_id: "inverter_pv1_Power"
+  name: "PV1 Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pv1watt'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:solar-power"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# RED ELÉCTRICA (AC/GRID)     #
+################################
+
+# Potencia de salida
+- state_topic: "energy/growatt"
+  unique_id: "inverter_ac_power_out"
+  name: "Output Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvpowerout'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:power-plug"
+  expire_after: 120
+  device: *growatt_device
+
+# Frecuencia de red
+- state_topic: "energy/growatt"
+  unique_id: "inverter_grid_frequency"
+  name: "Grid Frequency"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvfrequentie'] | float / 100 }}
+    {% endif %}
+  unit_of_measurement: "Hz"
+  device_class: "frequency"
+  state_class: "measurement"
+  icon: "mdi:sine-wave"
+  expire_after: 120
+  device: *growatt_device
+
+# Voltaje de red
+- state_topic: "energy/growatt"
+  unique_id: "inverter_grid_voltage"
+  name: "Inverter Output Voltage"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvgridvoltage'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:lightning-bolt"
+  expire_after: 120
+  device: *growatt_device
+
+# Corriente de red
+- state_topic: "energy/growatt"
+  unique_id: "inverter_grid_current"
+  name: "Inverter Output Current"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvgridcurrent'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "A"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:current-ac"
+  expire_after: 120
+  device: *growatt_device
+
+# Potencia a la red
+- state_topic: "energy/growatt"
+  unique_id: "grid_power"
+  name: "Inverter Output Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvgridpower'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:transmission-tower"
+  expire_after: 120
+  device: *growatt_device
+
+# Factor de potencia
+- state_topic: "energy/growatt"
+  unique_id: "inverter_power_factor"
+  name: "Power Factor"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pf'] | float / 10000 }}
+    {% endif %}
+  device_class: "power_factor"
+  state_class: "measurement"
+  icon: "mdi:sine-wave"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# CONSUMO (LOAD)              #
+################################
+
+# Potencia a la carga
+- state_topic: "energy/growatt"
+  unique_id: "load_power"
+  name: "Load Consumption Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['ptoloadtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:home-lightning-bolt"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# BATERÍA - ESTADO            #
+################################
+
+# Estado de la batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_soc"
+  name: "BMS State of Charge"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_soc'] }}
+    {% endif %}
+  unit_of_measurement: "%"
+  device_class: "battery"
+  state_class: "measurement"
+  icon: "mdi:battery"
+  expire_after: 120
+  device: *growatt_device
+
+# Estado de salud de batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_soh"
+  name: "BMS State of Health"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_soh'] }}
+    {% endif %}
+  unit_of_measurement: "%"
+  state_class: "measurement"
+  icon: "mdi:battery-heart-variant"
+  expire_after: 120
+  device: *growatt_device
+
+# Estado del sistema de batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_system_state"
+  name: "Battery System State"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_sysstatemode'] }}
+    {% endif %}
+  icon: "mdi:battery-check"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Estado BMS
+- state_topic: "energy/growatt"
+  unique_id: "battery_bms_status"
+  name: "BMS Status"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_status'] }}
+    {% endif %}
+  icon: "mdi:battery-heart"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# Estado de carga BDC1
+- state_topic: "energy/growatt"
+  unique_id: "battery_bdc1_flag"
+  name: "Battery BDC Flag"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_flag'] }}
+    {% endif %}
+  icon: "mdi:battery-check"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 State of Charge
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_soc"
+  name: "BDC1 State of Charge"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_soc'] }}
+    {% endif %}
+  unit_of_measurement: "%"
+  device_class: "battery"
+  state_class: "measurement"
+  icon: "mdi:battery-50"
+  expire_after: 120
+  device: *growatt_device
+
+# BMS Cycle Count
+- state_topic: "energy/growatt"
+  unique_id: "bms_cycle_count"
+  name: "BMS Cycle Count"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_cyclecnt'] }}
+    {% endif %}
+  state_class: "total_increasing"
+  icon: "mdi:battery-sync"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# BATERÍA - PARÁMETROS        #
+################################
+
+# Voltaje de batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_voltage"
+  name: "BMS Battery Voltage"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_batteryvolt'] | float / 100 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:battery-charging"
+  expire_after: 120
+  device: *growatt_device
+
+# Corriente de batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_current"
+  name: "BMS Battery Current"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {% set raw = value_json['values']['bms_batterycurr'] | int %}
+      {% set signed = raw if raw < 32768 else raw - 65536 %}
+      {{ signed / 100 }}
+    {% endif %}
+  unit_of_measurement: "A"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:battery-charging-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# Potencia de descarga de batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_discharge_power"
+  name: "BDC1 Discharge Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_pdischr'] | float / 10  }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:battery-minus-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# Potencia de carga de batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_charge_power"
+  name: "BDC1 Charge Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_pchr'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:battery-plus-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# Corriente máxima de la batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_max_current"
+  name: "BMS Max Current"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_maxcurr'] | float / 100 }}
+    {% endif %}
+  unit_of_measurement: "A"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:current-dc"
+  expire_after: 120
+  device: *growatt_device
+
+# Delta de voltaje de batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_delta_voltage"
+  name: "BMS Delta Voltage"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_deltavolt'] | float / 100 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:battery-minus"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 Battery Voltage
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_battery_voltage"
+  name: "BDC1 Battery Voltage"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_vbat'] | float / 100 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:battery"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 Battery Current
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_battery_current"
+  name: "BDC1 Battery Current"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {% set raw = value_json['values']['bdc1_ibat'] | int %}
+      {% set signed = raw if raw < 32768 else raw - 65536 %}
+      {{ signed / 10 }}
+    {% endif %}
+  unit_of_measurement: "A"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:current-dc"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# BATERÍA - PARÁMETROS BDC    #
+################################
+
+# BDC1 Bus Voltage 1
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_bus_voltage_1"
+  name: "BDC1 Bus Voltage 1"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_vbus1'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:lightning-bolt"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 Bus Voltage 2
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_bus_voltage_2"
+  name: "BDC1 Bus Voltage 2"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_vbus2'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:lightning-bolt"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 BB Current
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_bb_current"
+  name: "BDC1 BB Current"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_ibb'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "A"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:current-dc"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 Temperatura A
+- state_topic: "energy/growatt"
+  unique_id: "battery_bdc1_tempa"
+  name: "BDC1 Temperature A"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_tempa'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "°C"
+  device_class: "temperature"
+  state_class: "measurement"
+  icon: "mdi:thermometer"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 Temperatura B
+- state_topic: "energy/growatt"
+  unique_id: "battery_bdc1_tempb"
+  name: "BDC1 Temperature B"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_tempb'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "°C"
+  device_class: "temperature"
+  state_class: "measurement"
+  icon: "mdi:thermometer"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 Fault Code
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_fault_code"
+  name: "BDC1 Fault Code"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_faultcode'] }}
+    {% endif %}
+  icon: "mdi:alert-circle"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 Warning Code
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_warning_code"
+  name: "BDC1 Warning Code"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_warncode'] }}
+    {% endif %}
+  icon: "mdi:alert"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# BDC1 ILLC
+- state_topic: "energy/growatt"
+  unique_id: "bdc1_illc"
+  name: "BDC1 ILLC"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_illc'] }}
+    {% endif %}
+  icon: "mdi:current-dc"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# BMS ERROR/WARNING            #
+################################
+
+# BMS Error
+- state_topic: "energy/growatt"
+  unique_id: "bms_error_code"
+  name: "BMS Error Code"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_error'] }}
+    {% endif %}
+  icon: "mdi:alert"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+# BMS Warning Info
+- state_topic: "energy/growatt"
+  unique_id: "bms_warning_info"
+  name: "BMS Warning Info"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bms_warninfo'] }}
+    {% endif %}
+  icon: "mdi:alert-circle-outline"
+  state_class: "measurement"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# MEDIDAS ELÉCTRICAS MISC      #
+################################
+
+# Voltaje del bus positivo
+- state_topic: "energy/growatt"
+  unique_id: "inverter_pbus_voltage"
+  name: "Positive Bus Voltage"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pbusvoltage'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:lightning-bolt"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# ENERGÍA GENERADA             #
+################################
+
+# Energía generada hoy
+- state_topic: "energy/growatt"
+  unique_id: "inverter_energy_today"
+  name: "Power Generation - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvenergytoday'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:solar-power"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía total generada
+- state_topic: "energy/growatt"
+  unique_id: "inverter_energy_total"
+  name: "Power Generation - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['pvenergytotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:solar-power"
+  expire_after: 120
+  device: *growatt_device
+
+# EPV Total (Total energy generated by PV)
+- state_topic: "energy/growatt"
+  unique_id: "epv_total"
+  name: "PV-All Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['epvtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:solar-power"
+  expire_after: 120
+  device: *growatt_device
+
+# EPV1 Today (Energy generated by PV1 today)
+- state_topic: "energy/growatt"
+  unique_id: "epv1_today"
+  name: "PV1 Energy - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['epv1today'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:solar-power"
+  expire_after: 120
+  device: *growatt_device
+
+# EPV1 Total (Total energy generated by PV1)
+- state_topic: "energy/growatt"
+  unique_id: "epv1_total"
+  name: "PV1 Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['epv1total'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:solar-power"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# ENERGÍA RED/CARGA            #
+################################
+
+# Energía total a usuario
+- state_topic: "energy/growatt"
+  unique_id: "energy_to_user_total"
+  name: "Import from Grid Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['etousertotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:home-import-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía a usuario hoy
+- state_topic: "energy/growatt"
+  unique_id: "energy_to_user_today"
+  name: "Import from Grid Energy - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['etousertoday'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:home-import-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía total a la red
+- state_topic: "energy/growatt"
+  unique_id: "energy_to_grid_total"
+  name: "Export to Grid Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['etogridtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:transmission-tower-export"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía a la red hoy
+- state_topic: "energy/growatt"
+  unique_id: "energy_to_grid_today"
+  name: "Export to Grid Energy - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['etogridtoday'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:transmission-tower-export"
+  expire_after: 120
+  device: *growatt_device
+
+# Total Energy to Load
+- state_topic: "energy/growatt"
+  unique_id: "energy_load_total"
+  name: "Load Consumption Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['eloadtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:power-socket"
+  expire_after: 120
+  device: *growatt_device
+
+# Energy to Load Today
+- state_topic: "energy/growatt"
+  unique_id: "energy_load_today"
+  name: "Load Consumption Energy - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['eloadtoday'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:power-socket"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# ENERGÍA BATERÍA              #
+################################
+
+# Energía descargada de la batería hoy
+- state_topic: "energy/growatt"
+  unique_id: "battery_discharged_today"
+  name: "Battery Discharged Energy - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['edischrtoday'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:battery-arrow-down"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía total descargada de la batería - Lógica Robusta
+# Energía total descargada de la batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_discharged_total"
+  name: "Battery Discharged Energy - Total"
+  value_template: >-
+    {% if value_json.get('device') == '<INVERTER_SERIAL>' and value_json.get('values', {}).get('edischrtotal') is not none %}
+      {% set nuevo_valor = value_json['values']['edischrtotal'] | float(-1) / 10 %}
+      {% set actual = this.state | float(-1) %}
+      
+      {% if nuevo_valor > 0 %}
+        {% if actual == -1 %}
+          {{ nuevo_valor }}
+        {% elif nuevo_valor >= actual and (nuevo_valor - actual) < 1000 %}
+          {{ nuevo_valor }}
+        {% else %}
+          {{ this.state }}
+        {% endif %}
+      {% else %}
+        {{ this.state }}
+      {% endif %}
+    {% else %}
+      {{ this.state if this.state is defined else 'unknown' }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:battery-arrow-down"
+  device: *growatt_device
+
+# Energía total cargada en la batería
+- state_topic: "energy/growatt"
+  unique_id: "battery_charged_total"
+  name: "Battery Charged Energy - Total"
+  value_template: >-
+    {% if value_json.get('device') == '<INVERTER_SERIAL>' and value_json.get('values', {}).get('echrtotal') is not none %}
+      {% set nuevo_valor = value_json['values']['echrtotal'] | float(-1) / 10 %}
+      {% set actual = this.state | float(-1) %}
+      
+      {% if nuevo_valor > 0 %}
+        {% if actual == -1 %}
+          {{ nuevo_valor }}
+        {% elif nuevo_valor >= actual and (nuevo_valor - actual) < 1000 %}
+          {{ nuevo_valor }}
+        {% else %}
+          {{ this.state }}
+        {% endif %}
+      {% else %}
+        {{ this.state }}
+      {% endif %}
+    {% else %}
+      {{ this.state if this.state is defined else 'unknown' }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:battery-arrow-up"
+  device: *growatt_device
+
+# Energía cargada en la batería hoy
+- state_topic: "energy/growatt"
+  unique_id: "battery_charged_today"
+  name: "Battery Charged Energy - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['echrtoday'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:battery-arrow-up"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía total de descarga de batería BDC1
+- state_topic: "energy/growatt"
+  unique_id: "battery_bdc1_discharged_total"
+  name: "BDC1 Discharged Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_edischrtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:battery-charging"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía total de carga de batería BDC1
+- state_topic: "energy/growatt"
+  unique_id: "battery_bdc1_charged_total"
+  name: "BDC1 Charged Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['bdc1_echrtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:battery-charging"
+  expire_after: 120
+  device: *growatt_device
+
+# Energía de carga AC total
+- state_topic: "energy/growatt"
+  unique_id: "inverter_ac_charged_total"
+  name: "Battery AC Charged Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['eacchrtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:transmission-tower-import"
+  expire_after: 120
+  device: *growatt_device
+
+# AC Charge Today
+- state_topic: "energy/growatt"
+  unique_id: "ac_charge_today"
+  name: "Battery AC Charged Energy - Today"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['eacchrtoday'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:transmission-tower-import"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# SEGURIDAD/PROTECCIÓN         #
+################################
+
+# Ground Fault Current Indicator
+- state_topic: "energy/growatt"
+  unique_id: "inverter_gfci"
+  name: "Ground Fault Current"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['gfci'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "mA"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:current-ac"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# SISTEMA DE EMERGENCIA (EPS)  #
+################################
+
+# EPS Frequency (Emergency Power Supply)
+- state_topic: "energy/growatt"
+  unique_id: "eps_frequency"
+  name: "EPS Frequency"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['epsfac'] | float / 100 }}
+    {% endif %}
+  unit_of_measurement: "Hz"
+  device_class: "frequency"
+  state_class: "measurement"
+  icon: "mdi:sine-wave"
+  expire_after: 120
+  device: *growatt_device
+
+# EPS Power (Emergency Power Supply)
+- state_topic: "energy/growatt"
+  unique_id: "eps_power"
+  name: "EPS Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['epspac'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:power-plug"
+  expire_after: 120
+  device: *growatt_device
+
+################################
+# PARÁMETROS OPERATIVOS        #
+################################
+
+# from grid
+- state_topic: "energy/growatt"
+  unique_id: "total_energy_to_user"
+  name: "Import from Grid Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['ptousertotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:home-import-outline"
+  expire_after: 120
+  device: *growatt_device
+
+# to Grid
+- state_topic: "energy/growatt"
+  unique_id: "total_energy_to_grid"
+  name: "Export to Grid Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ value_json['values']['ptogridtotal'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:home-export-outline"
+  expire_after: 120
+  device: *growatt_device
+
+###############################################
+# MEDIDOR INTELIGENTE (Eastron SDM230 Modbus) #
+###############################################
+
+# Voltajes SMD
+- state_topic: "energy/growatt"
+  unique_id: "smd_voltage_l1"
+  name: "Voltage L1"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['voltage_l1'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "V"
+  device_class: "voltage"
+  state_class: "measurement"
+  icon: "mdi:lightning-bolt"
+  expire_after: 120
+  device: &eastron_sdm_device
+    identifiers: ["SDM230"]
+    name: "Eastron SDM"
+    manufacturer: "Eastron"
+    model: "SDM230"
+
+# Corrientes SMD
+- state_topic: "energy/growatt"
+  unique_id: "smd_current_l1"
+  name: "Current L1"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['Current_l1'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "A"
+  device_class: "current"
+  state_class: "measurement"
+  icon: "mdi:current-ac"
+  expire_after: 120
+  device: *eastron_sdm_device
+
+# Frecuencia SMD
+- state_topic: "energy/growatt"
+  unique_id: "smd_frequency"
+  name: "Frequency"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['frequency'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "Hz"
+  device_class: "frequency"
+  state_class: "measurement"
+  icon: "mdi:sine-wave"
+  expire_after: 120
+  device: *eastron_sdm_device
+
+# Potencia activa bidireccional SMD
+- state_topic: "energy/growatt"
+  unique_id: "smd_pos_rev_act_power"
+  name: "Bidirectional Active Power"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['pos_rev_act_power'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:power-socket-eu"
+  expire_after: 120
+  device: *eastron_sdm_device
+
+# Factor de potencia SMD
+- state_topic: "energy/growatt"
+  unique_id: "smd_powerfactor"
+  name: "Power Factor"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['powerfactor'] | float / 1000 }}
+    {% endif %}
+  unit_of_measurement: "%"
+  device_class: "power_factor"
+  state_class: "measurement"
+  icon: "mdi:sine-wave"
+  expire_after: 120
+  device: *eastron_sdm_device
+
+# Energía total SMD
+- state_topic: "energy/growatt"
+  unique_id: "smd_pos_act_energy"
+  name: "Import from Grid Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['pos_act_energy'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:transmission-tower"
+  expire_after: 120
+  device: *eastron_sdm_device
+
+# Energía total SMD
+- state_topic: "energy/growatt"
+  unique_id: "smd_rev_act_energy"
+  name: "Export to Grid Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['rev_act_energy'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total"
+  icon: "mdi:transmission-tower-export"
+  expire_after: 120
+  device: *eastron_sdm_device
+
+# act_energy_kwh
+- state_topic: "energy/growatt"
+  unique_id: "smd_act_energy_kwh"
+  name: "Active Energy - Total"
+  value_template: >-
+    {% if value_json.device == '<DATALOGGER_SERIAL>' %}
+      {{ value_json['values']['act_energy_kwh'] | float / 10 }}
+    {% endif %}
+  unit_of_measurement: "kWh"
+  device_class: "energy"
+  state_class: "total_increasing"
+  icon: "mdi:transmission-tower"
+  expire_after: 120
+  device: *eastron_sdm_device
+
+# Potencia neta de batería (carga - descarga) para tarjeta sunsynk
+- state_topic: "energy/growatt"
+  unique_id: "battery_net_power"
+  name: "Battery Net Power"
+  value_template: >-
+    {% if value_json.device == '<INVERTER_SERIAL>' %}
+      {{ (value_json['values']['bdc1_pchr'] | float / 10) - (value_json['values']['bdc1_pdischr'] | float / 10) }}
+    {% endif %}
+  unit_of_measurement: "W"
+  device_class: "power"
+  state_class: "measurement"
+  icon: "mdi:battery-sync"
+  expire_after: 120
+  device: *growatt_device
