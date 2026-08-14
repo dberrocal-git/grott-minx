@@ -3,6 +3,16 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Monthly run catches drift: uvx picks the latest ruff and uv the latest 3.14t patch.
+    - cron: "15 5 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint-and-test:
