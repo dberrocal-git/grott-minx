@@ -146,6 +146,7 @@ class Proxy:
         self.sendbuf = {}     # Per-socket outbound queue.
         self.serverside = set()  # Sockets connected to the Growatt server.
         self.fallback_deadline = {}  # Fallback socket -> monotonic time to retry Growatt.
+        self.lastrec = {}  # Socket -> (rectype, protocol, length) of the last parsed record.
 
         self.blockcmd = conf.blockcmd
         self.noforward = conf.noforward
@@ -352,7 +353,13 @@ class Proxy:
             datalength = int.from_bytes(buf[4:6], "big")
 
             if protocol not in known_protocols or datalength == 0:
-                logger.warning("Unrecognized data stream (protocol %02x), record parsing resynchronized", protocol)
+                origin = "server" if sock in self.serverside else "datalogger"
+                last = self.lastrec.get(sock)
+                lastinfo = f"after record type {last[0]:02x}/proto {last[1]:02x}/{last[2]}B" if last else "at stream start"
+                logger.warning(
+                    "Unrecognized data stream from %s (%s): %d byte(s) dropped, head: %s",
+                    origin, lastinfo, len(buf), buf[:32].hex(),
+                )
                 if filtering:
                     self.queue_send(peer, buf)  # Fail open: an unparseable stream is never withheld.
                 buf = b""
@@ -368,6 +375,7 @@ class Proxy:
 
             record = buf[:reclength]
             buf = buf[reclength:]
+            self.lastrec[sock] = (record[7], protocol, reclength)
 
             # Hex dump is expensive: build it only when DEBUG is active.
             if logger.isEnabledFor(logging.DEBUG):
@@ -432,6 +440,7 @@ class Proxy:
             self.sendbuf.pop(s, None)
             self.serverside.discard(s)
             self.fallback_deadline.pop(s, None)
+            self.lastrec.pop(s, None)
             try:
                 s.close()
             except OSError:
