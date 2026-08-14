@@ -23,12 +23,11 @@ Designed for local resilience and for keeping the cloud's hands off your hardwar
 ```mermaid
 flowchart LR
     subgraph plant["☀️ Solar plant"]
-        direction TB
-        INV["⚡ MIN 6000TL-XH<br/>+ APX battery"]
         SM["🔌 Eastron SDM230"]
+        INV["⚡ MIN 6000TL-XH<br/>+ APX battery"]
         DL["📡 ShineLink-X"]
-        INV -- "RF link" --> DL
         SM -- "Modbus" --> INV
+        INV -- "RF" --> DL
     end
 
     subgraph host["🖥️ Proxy host (LAN)"]
@@ -40,16 +39,15 @@ flowchart LR
     end
 
     subgraph home["🏠 Home automation"]
-        direction TB
         M[("📨 MQTT broker")]
         HA{{"Home Assistant"}}
         M --> HA
     end
 
-    DL ==>|"XOR-masked records<br/>TCP :5279"| P
-    P ==>|"raw passthrough<br/>(offline fallback: local ACKs)"| G
-    G -.->|"ACKs · remote commands"| P
-    P -.->|"relayed · blockcmd filter"| DL
+    DL ==>|"XOR-masked records"| P
+    P ==>|"passthrough"| G
+    G -.->|"ACKs · commands"| P
+    P -.->|"relayed · blockcmd"| DL
     P ==>|"decoded JSON"| M
 
     classDef device fill:#1f6feb,stroke:#58a6ff,color:#fff,stroke-width:1px
