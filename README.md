@@ -91,8 +91,10 @@ same combination, everything here should work out of the box:
 > one this setup is tested with.
 
 Generic multi-inverter support, other operating modes and the unused record layouts
-from upstream were deliberately removed. If your hardware differs, expect to bring
-back the matching layout definitions from the original project.
+from upstream were deliberately removed. The two layouts kept (`T06NNNNXMIN` and
+`T06NN20`) come straight from the original project's `grottconf.py`. If your hardware
+differs, adapting this fork should in theory be a one-file change: copy the matching
+layout dictionary from upstream into `set_reclayouts()` in `grott.py`.
 
 > [!WARNING]
 > Newer ShineWiFi firmware versions replace the XOR obfuscation with **AES-CBC
@@ -169,8 +171,10 @@ sequenceDiagram
   (header excluded).
 - Protocol `05`/`06` records carry a CRC16-Modbus trailer: records failing the check
   are still relayed to Growatt but skipped for decoding/publishing.
-- Field offsets per record layout are defined in `grott.py` (`T06NNNNXMIN` for
-  MIN-series inverters, `T06NN20` for smart meters).
+- Field offsets per record layout are defined in `grott.py` (`set_reclayouts()`):
+  `T06NNNNXMIN` for MIN-series inverters and `T06NN20` for smart meters. Both layouts
+  are taken from [johanmeijer/grott](https://github.com/johanmeijer/grott)
+  (`grottconf.py`), which ships layouts for many more inverter models.
 - Published `values` are raw register integers; scaling factors (`divide`) are part of
   the layout definitions.
 

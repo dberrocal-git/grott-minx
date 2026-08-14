@@ -153,7 +153,7 @@ class GrottConf:
     def set_reclayouts(self):
         """Defines the record layouts: field name, hex offset, type and scale factor."""
         self.recorddict = {}
-        # Trimmed copy of the layout definitions from the upstream grottconf.py.
+        # Layouts taken from johanmeijer/grott (grottconf.py); add layouts for other models here.
         self.recorddict1 = {
             "T06NNNNXMIN": {
                 "decrypt": {"value": "true"},
