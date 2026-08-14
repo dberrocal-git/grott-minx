@@ -1,0 +1,19 @@
+# systemd unit for Debian/Ubuntu/Raspberry Pi OS and other systemd distros.
+# Adjust the two paths to your checkout, then:
+#   cp deploy/grott.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now grott
+
+[Unit]
+Description=grott-minx - Growatt TCP proxy to MQTT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/grott
+ExecStart=/opt/grott/.venv/bin/python grott.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

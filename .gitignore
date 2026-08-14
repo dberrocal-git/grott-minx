@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+# real config holds MQTT credentials; use grott.ini.example as template
+grott.ini

@@ -1,0 +1,54 @@
+[project]
+name = "grott-minx"
+version = "3.3.0"
+description = "Growatt MIN/APX/ShineLink-X monitor: TCP proxy + MQTT publishing"
+requires-python = ">=3.14"
+dependencies = [
+    "paho-mqtt>=1.6.1",
+]
+
+[tool.uv]
+# script-based repo: do not build/install the project itself into the venv
+package = false
+
+[tool.ruff]
+line-length = 125
+
+[tool.ruff.lint]
+# Google-style docstrings enforced (pydocstyle "D" rules).
+# BLE001: broad `except Exception` blocks are deliberate robustness barriers (relay/MQTT must never die)
+# DTZ005/DTZ007: payload timestamps are intentionally naive local/device time (consumer expects this format)
+extend-select = ["D"]
+ignore = ["BLE001", "DTZ005", "DTZ007"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Test helpers and nested fakes do not require full docstring coverage.
+"tests/*" = ["D"]
+
+[tool.pylint.main]
+ignore-paths = [".venv"]
+
+[tool.pylint.format]
+max-line-length = 125
+
+[tool.pylint."messages control"]
+# docstring/naming/size conventions relaxed to match the existing codebase style;
+# broad excepts and the module-level entry point in grott.py are by design
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "invalid-name",
+    "too-many-instance-attributes",
+    "too-many-branches",
+    "too-many-statements",
+    "too-many-locals",
+    "too-many-arguments",
+    "too-many-positional-arguments",
+    "too-few-public-methods",
+    "broad-exception-caught",
+    "global-statement",
+]

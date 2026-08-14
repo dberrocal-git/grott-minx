@@ -1,0 +1,43 @@
+; Copy to grott.ini and adjust. Values shown are the defaults used when a key is omitted.
+
+[Generic]
+loglevel = INFO
+includeall = True
+minrecl = 100
+time = server
+sendbuf = False
+; block remote register commands (types 05/06/10/18/19) sent by Growatt towards the datalogger
+blockcmd = False
+
+[Growatt]
+ip = 47.254.130.145
+port = 5279
+; local-only mode: never contact Growatt, the proxy acknowledges records itself
+noforward = False
+; when Growatt is unreachable, keep serving the datalogger locally so MQTT keeps flowing
+fallback = True
+; seconds between attempts to restore the Growatt connection while in fallback
+fallbackretry = 300
+
+[Proxy]
+; operational tuning of the TCP relay
+buffersize = 4096
+selecttimeout = 1.0
+connecttimeout = 10.0
+maxpending = 1048576
+maxparsebuf = 1048576
+backlog = 200
+tcpkeepidle = 60
+tcpkeepintvl = 10
+tcpkeepcnt = 3
+
+[MQTT]
+ip = <broker-ip>
+port = 1883
+topic = energy/growatt
+user = <mqtt-user>
+password = <mqtt-password>
+keepalive = 60
+publishtimeout = 2.0
+reconnectmindelay = 1
+reconnectmaxdelay = 30

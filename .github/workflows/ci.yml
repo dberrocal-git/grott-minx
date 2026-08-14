@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync environment (installs Python 3.14t + deps from uv.lock)
+        run: uv sync
+
+      - name: ruff
+        run: uvx ruff check grott.py grottproxy.py grottdata.py tests/test_smoke.py
+
+      - name: pylint
+        run: uv run --with pylint pylint grott.py grottproxy.py grottdata.py
+
+      - name: smoke test
+        run: uv run python tests/test_smoke.py

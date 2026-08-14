@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+
+description="grott-minx Growatt monitor (TCP proxy + MQTT)"
+
+directory="/root/grott"
+command="/root/grott/.venv/bin/python"
+command_args="grott.py"
+pidfile="/run/grott.pid"
+
+# supervise-daemon respawns the process if it dies and restarts it if unhealthy
+supervisor="supervise-daemon"
+respawn_delay=5
+output_log="/var/log/grott.log"
+error_log="/var/log/grott.log"
+
+healthcheck_delay=30
+healthcheck_timer=60
+
+depend() {
+    need net
+    use dns
+}
+
+start_pre() {
+    checkpath --file --mode 0644 "$output_log"
+}
+
+healthcheck() {
+    local port
+    port=$(awk -F= '/^[[:space:]]*grottport[[:space:]]*=/ {gsub(/[[:space:]]/, "", $2); print $2}' "$directory/grott.ini" 2>/dev/null | tail -n 1)
+    netstat -tln 2>/dev/null | grep -q ":${port:-5279} "
+}
