@@ -1,43 +1,89 @@
 ; Copy to grott.ini and adjust. Values shown are the defaults used when a key is omitted.
+; Booleans accept True/False; timeouts and delays are in seconds.
 
 [Generic]
+; Python logging level: DEBUG, INFO, WARNING or ERROR.
+; DEBUG also hex-dumps every Growatt record received.
 loglevel = INFO
+; address and port the proxy listens on for datalogger connections
+; (0.0.0.0 = all interfaces; point the datalogger here instead of server.growatt.com)
+grottip = 0.0.0.0
+grottport = 5279
+; True: publish every field defined in the record layout.
+; False: publish only the fields marked "include" in the layout.
 includeall = True
+; records of this many bytes or fewer (ACKs, pings, ...) are relayed untouched
+; but never parsed for MQTT
 minrecl = 100
+; timestamp source for the MQTT payload: "server" = proxy arrival time (recommended,
+; datalogger clocks drift), "inverter" = timestamp embedded in the record.
+; Buffered records always use the embedded timestamp.
 time = server
+; publish buffered records (type 50) uploaded by the datalogger after an outage;
+; False drops them from MQTT because they arrive late and would overwrite live values
 sendbuf = False
-; block remote register commands (types 05/06/10/18/19) sent by Growatt towards the datalogger
+; block remote register commands (types 05/06/10/18/19) sent by Growatt towards the
+; datalogger (remote on/off, settings/register writes). Also blocks Growatt's time-sync
+; command, which is irrelevant while time = server. Fails open: if the stream cannot be
+; parsed it is forwarded unfiltered rather than withheld.
 blockcmd = False
 
 [Growatt]
+; Growatt cloud server records are relayed to; 47.254.130.145 = server.growatt.com,
+; 5279 is the fixed port of the datalogger protocol
 ip = 47.254.130.145
 port = 5279
 ; local-only mode: never contact Growatt, the proxy acknowledges records itself
 noforward = False
-; when Growatt is unreachable, keep serving the datalogger locally so MQTT keeps flowing
+; when Growatt is unreachable, keep serving the datalogger locally (records are ACKed
+; and MQTT keeps flowing) instead of refusing the connection. Trade-off: records ACKed
+; locally are never backfilled to the cloud.
 fallback = True
 ; seconds between attempts to restore the Growatt connection while in fallback
 fallbackretry = 300
 
 [Proxy]
-; operational tuning of the TCP relay
+; operational tuning of the TCP relay; defaults suit a handful of dataloggers
+; bytes read per socket recv() call
 buffersize = 4096
+; seconds select() waits for socket activity; also the pace of housekeeping tasks
+; such as fallback retries (lower = more idle CPU wakeups)
 selecttimeout = 1.0
+; seconds to wait for the TCP connection to Growatt before declaring it unreachable
+; (which triggers fallback, if enabled)
 connecttimeout = 10.0
+; per-connection cap in bytes for data queued towards a peer that stops reading;
+; when exceeded the connection pair is closed (1048576 = 1 MiB)
 maxpending = 1048576
+; per-connection cap in bytes for the record-reassembly buffer; when exceeded the
+; parser discards it and resynchronizes (protects against corrupt streams)
 maxparsebuf = 1048576
+; maximum number of queued, not-yet-accepted incoming connections (listen backlog)
 backlog = 200
+; TCP keepalive: after tcpkeepidle seconds of silence probe every tcpkeepintvl seconds;
+; after tcpkeepcnt unanswered probes the connection is declared dead.
+; Defaults detect a vanished datalogger in ~90 s (60 + 3 x 10).
 tcpkeepidle = 60
 tcpkeepintvl = 10
 tcpkeepcnt = 3
 
 [MQTT]
+; broker address and credentials
 ip = <broker-ip>
 port = 1883
+; topic the JSON payload is published to
 topic = energy/growatt
 user = <mqtt-user>
 password = <mqtt-password>
+; True: disable MQTT publishing entirely (proxy/relay only)
+nomqtt = False
+; True: publish with the retain flag so the broker keeps the last message per topic
+retain = False
+; MQTT protocol keepalive in seconds (client pings the broker when the link is idle)
 keepalive = 60
+; max seconds to wait for the broker to confirm a publish; on timeout the record is
+; dropped so a broker outage never blocks the relay
 publishtimeout = 2.0
+; exponential backoff bounds in seconds for automatic broker reconnection
 reconnectmindelay = 1
 reconnectmaxdelay = 30
