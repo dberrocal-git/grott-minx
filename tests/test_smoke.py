@@ -63,6 +63,7 @@ def make_conf(**overrides):
         minrecl=100, mindatarec=12, datarec=["04", "50"], smartmeterrec=["1b", "20", "1e"],
         includeall=True, gtime="server", sendbuf=False,
         blockcmd=False, noforward=False, fallback=True, fallbackretry=300, forwardinterval=0,
+        timesync=False,
         buffersize=64, selecttimeout=0.2, connecttimeout=5.0,
         maxpending=1048576, maxparsebuf=1048576, backlog=10,
         tcpkeepidle=60, tcpkeepintvl=10, tcpkeepcnt=3,
@@ -404,6 +405,45 @@ def test_forward_interval():
     check("forwardinterval: both records still published to MQTT", calls == [600, 600], f"calls={calls}")
 
 
+def test_timesync():
+    """After an announce the proxy sets the datalogger clock (type 18, register 31)."""
+    loggerid = b"KWK1CK53HV"
+    payload = loggerid + bytes(200)  # The id sits at decrypted bytes 8..17.
+    datalength = 2 + len(payload)
+    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
+    masked = bytes.fromhex(decrypt(plain))  # XOR is symmetric: plaintext -> wire form.
+    announce = masked + calc_crc(masked).to_bytes(2, "big")
+
+    conf = make_conf(grottport=PROXY_PORT + 6, noforward=True, timesync=True)
+    proxy = Proxy(conf)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 6), timeout=10)
+    client.settimeout(10)
+    client.sendall(announce)
+
+    expected_ack = announce[0:4] + b"\x00\x03" + announce[6:8] + b"\x47"
+    expected_ack += calc_crc(expected_ack).to_bytes(2, "big")
+    expected_cmd_len = 8 + 10 + 20 + 2 + 2 + 19 + 2  # header+id+pad+reg+len+datetime+crc
+    data = b""
+    while len(data) < len(expected_ack) + expected_cmd_len:
+        data += client.recv(4096)
+    client.close()
+    time.sleep(0.3)
+    proxy.shutdown()
+
+    ack, cmd = data[: len(expected_ack)], data[len(expected_ack) :]
+    plain_cmd = decrypt(cmd[:-2])
+    check("timesync: announce ACKed first", ack == expected_ack)
+    check("timesync: command is type 18 with valid CRC",
+          cmd[7] == 0x18 and calc_crc(cmd[:-2]) == int.from_bytes(cmd[-2:], "big"))
+    check("timesync: command targets this datalogger and register 31",
+          plain_cmd[16:36] == loggerid.hex() and plain_cmd[76:80] == "001f")
+    check("timesync: payload carries a current datetime",
+          bytes.fromhex(plain_cmd[84:88]).decode() == "20")
+
+
 def test_mqtt():
     """Publishes through a fake broker and fails fast when no broker listens."""
     got = {"raw": b""}
@@ -459,6 +499,7 @@ if __name__ == "__main__":
     test_growatt_down_fallback()
     test_resync_after_trailer()
     test_forward_interval()
+    test_timesync()
     test_mqtt()
     print("RESULT:", "ALL TESTS PASSED" if not FAILURES else f"FAILED: {FAILURES}")
     sys.exit(1 if FAILURES else 0)

@@ -4,9 +4,10 @@ import logging
 import select
 import socket
 import time
+from datetime import datetime
 from signal import SIG_DFL, SIGPIPE, signal
 
-from grottdata import format_multi_line, procdata
+from grottdata import decrypt, format_multi_line, procdata
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +49,12 @@ def build_ack(record):
 
     Returns:
         The acknowledge bytes, or None for record types the real server never
-        answers (type ``29``). Pings (type ``16``) are acknowledged by echo.
+        answers (type ``29`` and command responses). Pings (``16``) are echoed.
     """
     rectype = record[7]
     if rectype == 0x16:
         return record
-    if rectype == 0x29:
+    if rectype == 0x29 or rectype in blocked_rectypes:  # No response for these, like the real server.
         return None
     # Layout: seq + protocol + length(=3: deviceno, rectype, ack byte) + deviceno + rectype.
     prefix = record[0:4] + (3).to_bytes(2, "big") + record[6:8]
@@ -61,6 +62,38 @@ def build_ack(record):
         ack = prefix + b"\x47"  # Ack byte 0x00 XOR-masked with the "G" of "Growatt".
         return ack + calc_crc(ack).to_bytes(2, "big")
     return prefix + b"\x00"
+
+
+def build_time_command(record):
+    """Crafts the clock-set command the Growatt server sends after an announce.
+
+    Mirrors upstream grottserver's createtimecommand: a type ``18`` write of
+    register 31 with the current host datetime, addressed to the datalogger id
+    carried in the announce record.
+
+    Args:
+        record: The CRC-valid announce (type ``03``) record as received.
+
+    Returns:
+        The masked, CRC-terminated command bytes, or None when the announce is
+        too short to carry a datalogger id.
+    """
+    protocol = record[3]
+    plainhex = decrypt(record) if protocol in (0x05, 0x06) else record.hex()
+    if len(plainhex) < 36:
+        return None
+    loggerid = bytes.fromhex(plainhex[16:36])
+    body = loggerid
+    if protocol == 0x06:
+        body += bytes(20)  # Protocol 06 pads the id field to 30 bytes.
+    value = str(datetime.now().replace(microsecond=0)).encode()
+    body += (31).to_bytes(2, "big") + len(value).to_bytes(2, "big") + value
+    header = (1).to_bytes(2, "big") + bytes([0x00, protocol]) + (len(body) + 2).to_bytes(2, "big") + b"\x01\x18"
+    plain = header + body
+    if protocol not in (0x05, 0x06):
+        return plain
+    masked = bytes.fromhex(decrypt(plain))  # XOR is symmetric.
+    return masked + calc_crc(masked).to_bytes(2, "big")
 
 
 def find_next_header(buf):
@@ -172,6 +205,8 @@ class Proxy:
         self.fallback_retry = conf.fallbackretry
         self.forward_interval = conf.forwardinterval
         self.lastfwd = {}  # Socket -> {rectype: monotonic time of last record forwarded to Growatt}.
+        self.timesync = conf.timesync
+        self.timesynced = set()  # Datalogger sockets whose clock was already set this session.
 
         # Operational tuning (grott.ini [Proxy] section).
         self.buffer_size = conf.buffersize
@@ -456,6 +491,15 @@ class Proxy:
                     if sock not in self.channel:
                         return  # Connection closed while queueing.
 
+            if self.timesync and rectype == 0x03 and sock not in self.serverside and sock not in self.timesynced:
+                cmd = build_time_command(record)
+                if cmd:
+                    self.timesynced.add(sock)
+                    self.queue_send(sock, cmd)
+                    logger.info("Datalogger clock synchronized to host time (type 18, register 31)")
+                    if sock not in self.channel:
+                        return
+
             # Process only records longer than minrecl; guarded so a bad record never stops the relay.
             if len(record) > conf.minrecl:
                 try:
@@ -494,6 +538,7 @@ class Proxy:
             self.fallback_deadline.pop(s, None)
             self.lastrec.pop(s, None)
             self.lastfwd.pop(s, None)
+            self.timesynced.discard(s)
             try:
                 s.close()
             except OSError:

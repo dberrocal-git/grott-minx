@@ -100,6 +100,7 @@ class GrottConf:
         self.fallback = True
         self.fallbackretry = 300
         self.forwardinterval = 0
+        self.timesync = False
 
         self.minrecl = 100
         self.mindatarec = 12
@@ -147,6 +148,7 @@ class GrottConf:
                 self.fallback = config.getboolean("Growatt", "fallback", fallback=self.fallback)
                 self.fallbackretry = config.getint("Growatt", "fallbackretry", fallback=self.fallbackretry)
                 self.forwardinterval = config.getint("Growatt", "forwardinterval", fallback=self.forwardinterval)
+                self.timesync = config.getboolean("Growatt", "timesync", fallback=self.timesync)
 
             if config.has_section("Proxy"):
                 self.buffersize = config.getint("Proxy", "buffersize", fallback=self.buffersize)

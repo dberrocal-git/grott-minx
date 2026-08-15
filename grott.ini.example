@@ -48,6 +48,9 @@ fallbackretry = 300
 ; Lets the datalogger report every minute for local MQTT while the cloud sees a
 ; 3-5 min cadence (skipped records are ACKed locally).
 forwardinterval = 0
+; set the datalogger clock to host time after each announce (useful with a dead
+; RTC battery or in noforward/fallback modes where the cloud never syncs it)
+timesync = False
 
 [Proxy]
 ; operational tuning of the TCP relay; defaults suit a handful of dataloggers
