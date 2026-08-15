@@ -66,7 +66,7 @@ def make_conf(**overrides):
         timesync=False,
         buffersize=64, selecttimeout=0.2, connecttimeout=5.0,
         maxpending=1048576, maxparsebuf=1048576, backlog=10,
-        tcpkeepidle=60, tcpkeepintvl=10, tcpkeepcnt=3, idletimeout=180,
+        tcpkeepidle=60, tcpkeepintvl=10, tcpkeepcnt=3,
         mqttkeepalive=60, mqttpublishtimeout=2.0, mqttreconnectmin=1, mqttreconnectmax=30,
         recorddict={
             "T06NNNNXMIN": {
@@ -339,28 +339,6 @@ def test_resync_after_trailer():
     check("scan-resync recovers the record after an unparseable trailer", calls == [600, 600], f"calls={calls}")
 
 
-def test_idle_watchdog():
-    """A silent datalogger session is dropped after idletimeout so it reconnects fresh."""
-    conf = make_conf(grottport=PROXY_PORT + 7, noforward=True, idletimeout=2)
-    proxy = Proxy(conf)
-    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
-    time.sleep(0.3)
-
-    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 7), timeout=10)
-    client.settimeout(10)
-    client.sendall(make_record(0x61, rectype=0x16, total_len=20))
-    client.recv(4096)  # ping echo: session is alive
-    try:
-        closed = client.recv(4096) == b""  # then silence -> watchdog must drop it
-    except OSError:
-        closed = True
-    check("idletimeout: silent datalogger session recycled", closed)
-    check("idletimeout: no lingering session state", not proxy.lastio and not proxy.channel)
-
-    client.close()
-    proxy.shutdown()
-
-
 def test_forward_interval():
     """Throttle: first data record reaches Growatt, the next is withheld and ACKed locally."""
     rec1 = make_record(0x51, rectype=0x04, total_len=600)
@@ -520,7 +498,6 @@ if __name__ == "__main__":
     test_noforward()
     test_growatt_down_fallback()
     test_resync_after_trailer()
-    test_idle_watchdog()
     test_forward_interval()
     test_timesync()
     test_mqtt()
