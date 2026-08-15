@@ -15,7 +15,8 @@ known_protocols = (0x00, 0x02, 0x05, 0x06)
 # Register read/write record types the Growatt server may send towards the datalogger/inverter.
 blocked_rectypes = (0x05, 0x06, 0x10, 0x18, 0x19)
 # Record types observed (ShineLink-X 7.x) to carry an undeclared encrypted trailer after the frame.
-trailer_rectypes = (0x29, 0x38)
+# 0x18 is the datalogger's response to our own timesync command (see build_time_command).
+trailer_rectypes = (0x18, 0x29, 0x38)
 
 
 def calc_crc(data):
