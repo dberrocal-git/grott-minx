@@ -15,8 +15,35 @@ known_protocols = (0x00, 0x02, 0x05, 0x06)
 # Register read/write record types the Growatt server may send towards the datalogger/inverter.
 blocked_rectypes = (0x05, 0x06, 0x10, 0x18, 0x19)
 # Record types observed (ShineLink-X 7.x) to carry an undeclared encrypted trailer after the frame.
-# 0x18 is the datalogger's response to our own timesync command (see build_time_command).
-trailer_rectypes = (0x18, 0x29, 0x38)
+# 0x18 is the datalogger's response to our own timesync command (see build_time_command),
+# 0x19 the response to the server's register read, 0x37 ShineLink slave sub-frames.
+trailer_rectypes = (0x18, 0x19, 0x29, 0x37, 0x38)
+
+
+def xor_peek(data, limit=32):
+    """Renders *data* XOR-decoded with the Growatt mask, as printable ASCII.
+
+    Noise on this stream is virtually always XOR-masked (firmware trailers and
+    ShineLink slave sub-frames), so the decoded view reveals ids and payloads
+    that the raw hex hides. Non-printable bytes become dots. Two mask alignments
+    are returned: offset 0 (trailer starts right at the mask) and offset 8
+    (trailer carries the usual 8-byte clear header). If both start unprintable
+    the bytes were probably not XOR-masked at all.
+
+    Args:
+        data: Raw bytes to peek at.
+        limit: Maximum bytes decoded per alignment.
+
+    Returns:
+        The two printable previews joined with `` | ``.
+    """
+    mask = b"Growatt"
+    views = []
+    for off in (0, 8):
+        chunk = data[off : off + limit]
+        decoded = bytes(b ^ mask[i % len(mask)] for i, b in enumerate(chunk))
+        views.append("".join(chr(b) if 32 <= b < 127 else "." for b in decoded))
+    return f"{views[0]} | {views[1]}"
 
 
 def calc_crc(data):
@@ -445,15 +472,18 @@ class Proxy:
                 last = self.lastrec.get(sock)
                 if last and last[0] in trailer_rectypes:
                     # Known firmware quirk: these records carry an undeclared encrypted trailer.
-                    logger.debug("Skipped %d trailer byte(s) after type-%02x record", len(skipped), last[0])
+                    logger.debug(
+                        "Skipped %d trailer byte(s) after type-%02x record, head: %s xor: %s",
+                        len(skipped), last[0], skipped[:32].hex(), xor_peek(skipped),
+                    )
                 else:
                     origin = "server" if sock in self.serverside else "datalogger"
                     lastinfo = (
                         f"after record type {last[0]:02x}/proto {last[1]:02x}/{last[2]}B" if last else "at stream start"
                     )
                     logger.warning(
-                        "Unrecognized data stream from %s (%s): %d byte(s) skipped, head: %s",
-                        origin, lastinfo, len(skipped), skipped[:32].hex(),
+                        "Unrecognized data stream from %s (%s): %d byte(s) skipped, head: %s xor: %s",
+                        origin, lastinfo, len(skipped), skipped[:32].hex(), xor_peek(skipped),
                     )
                 if perrecord:
                     if squelching and sock in self.swallow_trailer:
