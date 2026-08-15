@@ -101,8 +101,11 @@ def find_next_header(buf):
 
     A plausible header has a zero protocol high byte, a known protocol id and a
     sane declared length. The CRC check downstream weeds out false positives.
+    The scan window is capped so a long run of noise cannot turn this into an
+    O(n^2) stall of the single-threaded relay loop.
     """
-    for i in range(1, len(buf) - 7):
+    limit = min(len(buf) - 7, 8192)
+    for i in range(1, max(limit, 1)):
         if buf[i + 2] == 0x00 and buf[i + 3] in known_protocols:
             length = int.from_bytes(buf[i + 4 : i + 6], "big")
             if 0 < length <= 4096:
@@ -408,8 +411,11 @@ class Proxy:
         while len(buf) >= 8:
             protocol = buf[3]
             datalength = int.from_bytes(buf[4:6], "big")
+            reclength = datalength + 8 if protocol in (0x05, 0x06) else datalength + 6
 
-            if protocol not in known_protocols or datalength == 0:
+            # reclength < 8 would make the rectype byte (record[7]) out of range below;
+            # such implausibly short "records" are treated as noise, same as an unknown protocol.
+            if protocol not in known_protocols or datalength == 0 or reclength < 8:
                 nxt = find_next_header(buf)
                 skipped = buf[:nxt] if nxt != -1 else buf
                 last = self.lastrec.get(sock)
@@ -435,70 +441,77 @@ class Proxy:
                 buf = buf[nxt:]  # Resume parsing at the recovered header.
                 continue
 
-            if protocol in (0x05, 0x06):
-                reclength = datalength + 8
-            else:
-                reclength = datalength + 6
-
             if len(buf) < reclength:
                 break  # Incomplete record: keep it buffered until more data arrives.
 
             record = buf[:reclength]
             buf = buf[reclength:]
-            self.lastrec[sock] = (record[7], protocol, reclength)
 
             # Hex dump is expensive: build it only when DEBUG is active.
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Growatt record received:\n%s", format_multi_line("\t", record, 120))
 
-            # CRC16-Modbus trailer (protocols 05/06 only).
-            crc_ok = protocol not in (0x05, 0x06) or calc_crc(record[:-2]) == int.from_bytes(record[-2:], "big")
-            rectype = record[7]
+            # From here on, `buf` already reflects this record being consumed: any error in
+            # per-record handling below is contained to this record and can never corrupt
+            # the stream position or lose the bytes still waiting in `buf`.
+            try:
+                self.lastrec[sock] = (record[7], protocol, reclength)
 
-            if filtering:
-                if crc_ok and rectype in blocked_rectypes:
-                    logger.warning("Blocked remote command record (type %02x) towards datalogger", rectype)
-                    continue
-                self.queue_send(peer, record)
-                if sock not in self.channel:
-                    return  # Pair closed while queueing.
+                # CRC16-Modbus trailer (protocols 05/06 only).
+                crc_ok = protocol not in (0x05, 0x06) or calc_crc(record[:-2]) == int.from_bytes(record[-2:], "big")
+                rectype = record[7]
 
-            if throttling:
-                if crc_ok and rectype in throttled_rectypes:
-                    now = time.monotonic()
-                    lastfwd = self.lastfwd.setdefault(sock, {})
-                    last_t = lastfwd.get(rectype)
-                    if last_t is None or now - last_t >= self.forward_interval:
-                        lastfwd[rectype] = now
-                        self.queue_send(peer, record)
-                    else:
-                        # Cloud-friendly cadence: withhold from Growatt, satisfy the datalogger locally.
-                        logger.debug("Record type %02x withheld from Growatt (forwardinterval), ACKed locally", rectype)
-                        self.queue_send(sock, build_ack(record))
-                else:
+                if filtering:
+                    if crc_ok and rectype in blocked_rectypes:
+                        logger.warning("Blocked remote command record (type %02x) towards datalogger", rectype)
+                        continue
                     self.queue_send(peer, record)
-                if sock not in self.channel:
-                    return  # Pair closed while queueing.
+                    if sock not in self.channel:
+                        return  # Pair closed while queueing.
 
-            if not crc_ok:
-                logger.warning("Record CRC mismatch, record not processed")
+                if throttling:
+                    if crc_ok and rectype in throttled_rectypes:
+                        now = time.monotonic()
+                        lastfwd = self.lastfwd.setdefault(sock, {})
+                        last_t = lastfwd.get(rectype)
+                        if last_t is None or now - last_t >= self.forward_interval:
+                            lastfwd[rectype] = now
+                            self.queue_send(peer, record)
+                        else:
+                            # Cloud-friendly cadence: withhold from Growatt, satisfy the datalogger locally.
+                            logger.debug(
+                                "Record type %02x withheld from Growatt (forwardinterval), ACKed locally", rectype
+                            )
+                            self.queue_send(sock, build_ack(record))
+                    else:
+                        self.queue_send(peer, record)
+                    if sock not in self.channel:
+                        return  # Pair closed while queueing.
+
+                if not crc_ok:
+                    logger.warning("Record CRC mismatch, record not processed")
+                    continue
+
+                if localmode:
+                    ack = build_ack(record)
+                    if ack:
+                        self.queue_send(sock, ack)
+                        if sock not in self.channel:
+                            return  # Connection closed while queueing.
+
+                if self.timesync and rectype == 0x03 and sock not in self.serverside and sock not in self.timesynced:
+                    cmd = build_time_command(record)
+                    if cmd:
+                        self.timesynced.add(sock)
+                        self.queue_send(sock, cmd)
+                        logger.info("Datalogger clock synchronized to host time (type 18, register 31)")
+                        if sock not in self.channel:
+                            return
+            except Exception:
+                # A single malformed/unexpected record must never corrupt the stream position
+                # or crash the relay loop; `buf` already excludes this record either way.
+                logger.exception("Error handling record (type %02x, %dB), record skipped", record[7], reclength)
                 continue
-
-            if localmode:
-                ack = build_ack(record)
-                if ack:
-                    self.queue_send(sock, ack)
-                    if sock not in self.channel:
-                        return  # Connection closed while queueing.
-
-            if self.timesync and rectype == 0x03 and sock not in self.serverside and sock not in self.timesynced:
-                cmd = build_time_command(record)
-                if cmd:
-                    self.timesynced.add(sock)
-                    self.queue_send(sock, cmd)
-                    logger.info("Datalogger clock synchronized to host time (type 18, register 31)")
-                    if sock not in self.channel:
-                        return
 
             # Process only records longer than minrecl; guarded so a bad record never stops the relay.
             if len(record) > conf.minrecl:

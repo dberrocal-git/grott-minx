@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 logging.basicConfig(level=logging.WARNING)
 
 import grottproxy
-from grottdata import MQTTPublisher, decrypt
-from grottproxy import Proxy, build_ack, calc_crc
+from grottdata import MQTTPublisher, decrypt, procdata, shutdown_mqtt
+from grottproxy import Proxy, build_ack, calc_crc, find_next_header
 
 PROXY_PORT = 15888
 SERVER_PORT = 15279
@@ -444,6 +444,61 @@ def test_timesync():
           bytes.fromhex(plain_cmd[84:88]).decode() == "20")
 
 
+def test_malformed_records_dont_corrupt_stream():
+    """An implausibly short record (reclength<8) is treated as noise, not an IndexError crash."""
+    # protocol 0x02, datalength=1 -> reclength=7: used to raise IndexError on record[7].
+    tiny = bytes([0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0x00, 0xAA])
+    good = make_record(0x61, rectype=0x04, total_len=600)
+
+    calls = []
+    orig = grottproxy.procdata
+    grottproxy.procdata = lambda conf, data: calls.append(len(data))
+
+    conf = make_conf(grottport=PROXY_PORT + 7, noforward=True)
+    proxy = Proxy(conf)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 7), timeout=10)
+    client.settimeout(10)
+    client.sendall(tiny + good)
+    wait_for(lambda: calls)
+    still_up = proxy.running and (client.send(b"") == 0 or True)  # send() raises if the socket died
+    client.close()
+    time.sleep(0.3)
+    proxy.shutdown()
+    grottproxy.procdata = orig
+
+    check("tiny implausible record doesn't crash the parser", still_up)
+    check("the valid record right after it is still processed", calls == [600], f"calls={calls}")
+
+
+def test_resync_bounded():
+    """find_next_header never scans past its window, however large the noise run is."""
+    noise = b"\xff" * 100_000
+    t0 = time.time()
+    result = find_next_header(noise)
+    elapsed = time.time() - t0
+    check("find_next_header on 100KB of pure noise returns fast (bounded scan)", elapsed < 0.5, f"{elapsed:.2f}s")
+    check("...and reports no plausible header found", result == -1)
+
+
+def test_mqtt_publish_never_blocks_the_caller():
+    """procdata() must return immediately even if the MQTT broker never responds."""
+    rec = make_record(0x71, rectype=0x04, total_len=600)
+    # Point at a TCP port nothing answers on: connect_async will keep retrying in the background,
+    # so the publisher is never "connected" -- exactly the stuck-broker scenario being guarded against.
+    conf = make_conf(nomqtt=False, mqttip="127.0.0.1", mqttport=18990, mqttpublishtimeout=30.0)
+    try:
+        t0 = time.time()
+        procdata(conf, rec)
+        elapsed = time.time() - t0
+        check("procdata() with an unresponsive broker returns near-instantly (queued, not blocked)",
+              elapsed < 1.0, f"{elapsed:.2f}s")
+    finally:
+        shutdown_mqtt()
+
+
 def test_mqtt():
     """Publishes through a fake broker and fails fast when no broker listens."""
     got = {"raw": b""}
@@ -500,6 +555,9 @@ if __name__ == "__main__":
     test_resync_after_trailer()
     test_forward_interval()
     test_timesync()
+    test_malformed_records_dont_corrupt_stream()
+    test_resync_bounded()
+    test_mqtt_publish_never_blocks_the_caller()
     test_mqtt()
     print("RESULT:", "ALL TESTS PASSED" if not FAILURES else f"FAILED: {FAILURES}")
     sys.exit(1 if FAILURES else 0)

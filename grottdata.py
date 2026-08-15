@@ -3,6 +3,7 @@
 import codecs
 import json
 import logging
+import queue
 import textwrap
 import threading
 from datetime import datetime
@@ -195,11 +196,33 @@ class MQTTPublisher:
 
 # Shared MQTT publisher: one persistent, auto-reconnecting connection for all records.
 _mqtt_publisher = None
+# Bounded dispatch queue + dedicated worker: publish() runs its own timeout on this thread,
+# so a slow/stuck broker can never delay the relay loop that calls procdata().
+_publish_queue = None
+_publish_worker = None
+_PUBLISH_QUEUE_MAXSIZE = 200
+
+
+def _publish_worker_loop(timeout):
+    """Background loop: publishes queued messages, bounded by *timeout* per attempt."""
+    while True:
+        item = _publish_queue.get()
+        if item is None:
+            return  # Sentinel: shutdown requested.
+        topic, payload, retain, deviceid = item
+        try:
+            success = _mqtt_publisher.publish(topic=topic, payload=payload, qos=0, retain=retain, timeout=timeout)
+            if success:
+                logger.debug("MQTT message published for deviceid: %s", deviceid)
+            else:
+                logger.error("MQTT message publishing failed for deviceid: %s", deviceid)
+        except Exception:
+            logger.exception("Grott MQTT publish error for deviceid: %s", deviceid)
 
 
 def _get_mqtt_publisher(conf):
-    """Returns the shared MQTTPublisher, creating and starting it on first use."""
-    global _mqtt_publisher
+    """Returns the shared MQTTPublisher, creating and starting it (with its worker) on first use."""
+    global _mqtt_publisher, _publish_queue, _publish_worker
     if _mqtt_publisher is None:
         _mqtt_publisher = MQTTPublisher(
             hostname=conf.mqttip,
@@ -212,12 +235,37 @@ def _get_mqtt_publisher(conf):
             reconnect_max=conf.mqttreconnectmax,
         )
         _mqtt_publisher.start()
+        _publish_queue = queue.Queue(maxsize=_PUBLISH_QUEUE_MAXSIZE)
+        _publish_worker = threading.Thread(
+            target=_publish_worker_loop, args=(conf.mqttpublishtimeout,), daemon=True, name="mqtt-publish-worker"
+        )
+        _publish_worker.start()
     return _mqtt_publisher
 
 
+def _enqueue_publish(conf, topic, payload, retain, deviceid):
+    """Hands a message to the background publisher; never blocks the caller.
+
+    Starts the shared publisher and its worker thread on first use. If the
+    queue is full (broker stuck for a long time), the message is dropped and a
+    warning is logged instead of piling up unbounded memory or stalling.
+    """
+    _get_mqtt_publisher(conf)
+    try:
+        _publish_queue.put_nowait((topic, payload, retain, deviceid))
+    except queue.Full:
+        logger.warning("MQTT publish queue full (broker unresponsive?), dropping message for deviceid: %s", deviceid)
+
+
 def shutdown_mqtt():
-    """Closes the shared MQTT publisher (program shutdown)."""
-    global _mqtt_publisher
+    """Closes the shared MQTT publisher and stops its worker thread (program shutdown)."""
+    global _mqtt_publisher, _publish_queue, _publish_worker
+    if _publish_queue is not None:
+        _publish_queue.put(None)  # Sentinel: ask the worker to exit.
+    if _publish_worker is not None:
+        _publish_worker.join(timeout=2.0)
+        _publish_worker = None
+    _publish_queue = None
     if _mqtt_publisher is not None:
         _mqtt_publisher.close()
         _mqtt_publisher = None
@@ -419,13 +467,6 @@ def procdata(conf, data):
 
     try:
         logger.debug("MQTT message about to be sent for deviceid: %s", deviceid)
-        mqtt_publisher = _get_mqtt_publisher(conf)
-        success = mqtt_publisher.publish(
-            topic=conf.mqtttopic, payload=jsonmsg, qos=0, retain=conf.mqttretain, timeout=conf.mqttpublishtimeout
-        )
-        if success:
-            logger.debug("MQTT message published for deviceid: %s", deviceid)
-        else:
-            logger.error("MQTT message publishing failed for deviceid: %s", deviceid)
+        _enqueue_publish(conf, conf.mqtttopic, jsonmsg, conf.mqttretain, deviceid)
     except Exception as e:
         logger.error("\t - Grott MQTT publish error: %s", e)
