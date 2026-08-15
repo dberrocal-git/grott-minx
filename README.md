@@ -251,7 +251,6 @@ server configured in `[Growatt]`.
 | `[Growatt] noforward` | `False` | Local-only mode: never contact Growatt, the proxy ACKs records itself |
 | `[Growatt] fallback` | `True` | Serve the datalogger locally while Growatt is unreachable (MQTT keeps flowing) |
 | `[Growatt] fallbackretry` | `300` | Seconds between attempts to restore the Growatt connection |
-| `[Growatt] forwardinterval` | `0` | Min seconds between data records forwarded to Growatt (0 = all; MQTT always gets every record) |
 | `[Growatt] timesync` | `False` | Set the datalogger clock to host time after each announce (type `18`, register 31) |
 | `[Proxy] buffersize` | `4096` | `recv()` chunk size |
 | `[Proxy] selecttimeout` | `1.0` | Max `select()` blocking time (s) |
@@ -293,12 +292,6 @@ not configuration.
   be backfilled to the Growatt cloud. Set `fallback = False` to restore the strict
   behaviour (refuse connections, datalogger buffers for the cloud, no local data
   during outages).
-- **`[Growatt] forwardinterval = 300`** decouples local and cloud cadence: the
-  datalogger can report every minute (full 1-min resolution on MQTT) while only one
-  data record per interval is forwarded to Growatt — the cloud dislikes sub-3-minute
-  uploads and may ignore or rate-limit them. Withheld records are acknowledged
-  locally so the datalogger never retries; pings, announces, buffered records and
-  command responses always pass through untouched.
 - **`[Growatt] timesync = True`** sets the datalogger clock to the proxy host's time
   right after each session announce, exactly like the real server does (a type `18`
   write of register 31). Useful when the datalogger RTC battery is dead, and the only
