@@ -247,7 +247,7 @@ server configured in `[Growatt]`.
 | `[Generic] sendbuf` | `False` | Publish buffered (type `50`) records to MQTT |
 | `[Generic] includeall` | `True` | Include fields marked `incl: no` in layouts |
 | `[Generic] blockcmd` | `False` | Drop remote register commands (types `05/06/10/18/19`) server → datalogger |
-| `[Growatt] ip / port` | `47.254.130.145 / 5279` | Upstream Growatt server |
+| `[Growatt] ip / port` | `server.growatt.com / 5279` | Upstream Growatt server (hostname or IP) |
 | `[Growatt] noforward` | `False` | Local-only mode: never contact Growatt, the proxy ACKs records itself |
 | `[Growatt] fallback` | `True` | Serve the datalogger locally while Growatt is unreachable (MQTT keeps flowing) |
 | `[Growatt] fallbackretry` | `300` | Seconds between attempts to restore the Growatt connection |

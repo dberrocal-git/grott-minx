@@ -84,7 +84,8 @@ class GrottConf:
         self.loglevel = "INFO"
         self.grottport = 5279
         self.grottip = detect_local_ip()
-        self.growattip = "47.254.130.145"
+        # Hostname preferred over a fixed IP: Growatt has moved servers in the past.
+        self.growattip = "server.growatt.com"
         self.growattport = 5279
         self.mqttip = "localhost"
         self.mqttport = 1883

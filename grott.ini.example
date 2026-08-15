@@ -32,9 +32,9 @@ sendbuf = False
 blockcmd = False
 
 [Growatt]
-; Growatt cloud server records are relayed to; 47.254.130.145 = server.growatt.com,
-; 5279 is the fixed port of the datalogger protocol
-ip = 47.254.130.145
+; Growatt cloud server records are relayed to; hostname recommended over a fixed IP
+; (Growatt occasionally moves servers); 5279 is the fixed port of the datalogger protocol
+ip = server.growatt.com
 port = 5279
 ; local-only mode: never contact Growatt, the proxy acknowledges records itself
 noforward = False
