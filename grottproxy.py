@@ -200,6 +200,7 @@ class Proxy:
         self.serverside = set()  # Sockets connected to the Growatt server.
         self.fallback_deadline = {}  # Fallback socket -> monotonic time to retry Growatt.
         self.lastrec = {}  # Socket -> (rectype, protocol, length) of the last parsed record.
+        self.lastio = {}  # Socket -> monotonic time of the last byte seen on that socket.
 
         self.blockcmd = conf.blockcmd
         self.noforward = conf.noforward
@@ -207,6 +208,8 @@ class Proxy:
         self.fallback_retry = conf.fallbackretry
         self.timesync = conf.timesync
         self.timesynced = set()  # Datalogger sockets whose clock was already set this session.
+        self.squelched = set()   # Sessions whose timesync response was already withheld from Growatt.
+        self.swallow_trailer = set()  # Sockets whose next noise bytes are the withheld response's trailer.
 
         # Operational tuning (grott.ini [Proxy] section).
         self.buffer_size = conf.buffersize
@@ -214,6 +217,7 @@ class Proxy:
         self.connect_timeout = conf.connecttimeout
         self.max_pending = conf.maxpending
         self.max_parsebuf = conf.maxparsebuf
+        self.idle_timeout = getattr(conf, "idletimeout", 0)  # 0 = disabled.
         self.keepalive_opts = (conf.tcpkeepidle, conf.tcpkeepintvl, conf.tcpkeepcnt)
 
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -243,11 +247,25 @@ class Proxy:
     def _serve_once(self, conf):
         """Performs one select() round: expiries, pending sends, accepts and reads."""
         # Recycle fallback sessions so the Growatt connection is re-attempted periodically.
+        now = time.monotonic()
         if self.fallback_deadline:
-            now = time.monotonic()
             for sock in list(self.fallback_deadline):
                 if now >= self.fallback_deadline.get(sock, now + 1):
                     logger.info("Recycling local fallback session to re-attempt the Growatt connection")
+                    self.close_pair(sock)
+
+        # Silence watchdog: if the Growatt-side socket of a session has delivered no bytes
+        # for idle_timeout seconds the session is recycled (the datalogger re-announces and
+        # both sides are rebuilt). A zombie session can look ESTABLISHED to TCP while the
+        # cloud has long forgotten it (observed 2026-08-15: ~1h mute with cloud LED on).
+        if self.idle_timeout > 0:
+            for sock in list(self.serverside):
+                silent_for = now - self.lastio.get(sock, now)
+                if silent_for >= self.idle_timeout:
+                    logger.warning(
+                        "No data from Growatt server for %ds (idle timeout %ds), recycling session",
+                        int(silent_for), self.idle_timeout,
+                    )
                     self.close_pair(sock)
 
         writelist = [sock for sock, pending in self.sendbuf.items() if pending]
@@ -291,6 +309,7 @@ class Proxy:
         self.input_list.append(sock)
         self.recvbuf[sock] = b""
         self.sendbuf[sock] = b""
+        self.lastio[sock] = time.monotonic()
         self.channel[sock] = None
 
     def on_accept(self):
@@ -331,12 +350,14 @@ class Proxy:
             return
 
         logger.info("Client connection from: %s", clientaddr)
+        now = time.monotonic()
         for sock in (clientsock, forward):
             sock.setblocking(False)
             set_keepalive(sock, *self.keepalive_opts)
             self.input_list.append(sock)
             self.recvbuf[sock] = b""
             self.sendbuf[sock] = b""
+            self.lastio[sock] = now
         self.channel[clientsock] = forward
         self.channel[forward] = clientsock
         self.serverside.add(forward)
@@ -356,12 +377,16 @@ class Proxy:
             self.close_pair(sock)
             return
 
+        self.lastio[sock] = time.monotonic()
+
         if sock not in self.channel:
             return
         peer = self.channel[sock]
 
-        # Raw passthrough, unless this direction is command-filtered (then forwarded per record).
-        if peer is not None and not (self.blockcmd and sock in self.serverside):
+        # Raw passthrough, unless this direction is forwarded per record: server->datalogger
+        # when blockcmd filters commands, datalogger->server once we injected a timesync
+        # command (the datalogger's response to it must be withheld from the cloud).
+        if peer is not None and not (self.blockcmd and sock in self.serverside) and sock not in self.timesynced:
             self.queue_send(peer, data)
 
         # Record parsing: MQTT processing, filtered forwarding and local-mode ACKs.
@@ -401,6 +426,10 @@ class Proxy:
         buf = self.recvbuf.get(sock, b"") + data
         peer = self.channel.get(sock)
         filtering = self.blockcmd and sock in self.serverside and peer is not None
+        # A timesynced session forwards its uplink per record: the datalogger answers our
+        # injected time command with a type-18 record the cloud never asked for.
+        squelching = peer is not None and sock in self.timesynced
+        perrecord = filtering or squelching
         localmode = peer is None  # No-forward mode or offline fallback: the proxy ACKs records.
 
         while len(buf) >= 8:
@@ -426,10 +455,17 @@ class Proxy:
                         "Unrecognized data stream from %s (%s): %d byte(s) skipped, head: %s",
                         origin, lastinfo, len(skipped), skipped[:32].hex(),
                     )
-                if filtering:
-                    self.queue_send(peer, skipped)  # Fail open: an unparseable stream is never withheld.
-                    if sock not in self.channel:
-                        return
+                if perrecord:
+                    if squelching and sock in self.swallow_trailer:
+                        # Undeclared encrypted trailer of the withheld timesync response; may
+                        # span several TCP chunks, so the flag survives an inconclusive scan.
+                        if nxt != -1:
+                            self.swallow_trailer.discard(sock)
+                        logger.debug("Withheld %d trailer byte(s) of the suppressed timesync response", len(skipped))
+                    else:
+                        self.queue_send(peer, skipped)  # Fail open: an unparseable stream is never withheld.
+                        if sock not in self.channel:
+                            return
                 if nxt == -1:
                     buf = b""
                     break
@@ -450,15 +486,24 @@ class Proxy:
             # per-record handling below is contained to this record and can never corrupt
             # the stream position or lose the bytes still waiting in `buf`.
             try:
+                self.swallow_trailer.discard(sock)  # A valid record ends any pending trailer swallow.
                 self.lastrec[sock] = (record[7], protocol, reclength)
 
                 # CRC16-Modbus trailer (protocols 05/06 only).
                 crc_ok = protocol not in (0x05, 0x06) or calc_crc(record[:-2]) == int.from_bytes(record[-2:], "big")
                 rectype = record[7]
 
-                if filtering:
-                    if crc_ok and rectype in blocked_rectypes:
+                if perrecord:
+                    if filtering and crc_ok and rectype in blocked_rectypes:
                         logger.warning("Blocked remote command record (type %02x) towards datalogger", rectype)
+                        continue
+                    if squelching and crc_ok and rectype == 0x18 and sock not in self.squelched:
+                        # The answer to our injected time command: the cloud never sent one,
+                        # so it must never see the response. Only the first per session: we
+                        # inject exactly one command per session.
+                        self.squelched.add(sock)
+                        self.swallow_trailer.add(sock)
+                        logger.info("Withheld timesync response (type 18) from the Growatt server")
                         continue
                     self.queue_send(peer, record)
                     if sock not in self.channel:
@@ -500,7 +545,7 @@ class Proxy:
             return
         if len(buf) > self.max_parsebuf:
             logger.warning("Record parse buffer overflow, record parsing resynchronized")
-            if filtering:
+            if perrecord:
                 self.queue_send(peer, buf)
             buf = b""
         if sock in self.channel:
@@ -526,7 +571,10 @@ class Proxy:
             self.serverside.discard(s)
             self.fallback_deadline.pop(s, None)
             self.lastrec.pop(s, None)
+            self.lastio.pop(s, None)
             self.timesynced.discard(s)
+            self.squelched.discard(s)
+            self.swallow_trailer.discard(s)
             try:
                 s.close()
             except OSError:

@@ -295,7 +295,15 @@ not configuration.
 - **`[Growatt] timesync = True`** sets the datalogger clock to the proxy host's time
   right after each session announce, exactly like the real server does (a type `18`
   write of register 31). Useful when the datalogger RTC battery is dead, and the only
-  clock source in `noforward`/fallback modes.
+  clock source in `noforward`/fallback modes. The datalogger's response to this
+  injected command (and its undeclared encrypted trailer) is withheld from the
+  Growatt server — the cloud never sent the command, so it never sees the answer.
+- **`[Proxy] idletimeout = 300`** recycles the session when the Growatt-side socket
+  has delivered no data for that many seconds (0 disables it). Guards against zombie
+  sessions that stay TCP-ESTABLISHED while the cloud has silently dropped its side:
+  the datalogger keeps pinging (its cloud LED stays on) but nothing flows either way.
+  In healthy operation the server answers within seconds, so 5 minutes of silence is
+  always abnormal. The datalogger re-announces automatically after the recycle.
 
 ### Published payload
 

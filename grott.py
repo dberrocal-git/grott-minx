@@ -116,6 +116,10 @@ class GrottConf:
         self.maxpending = 1048576
         self.maxparsebuf = 1048576
         self.backlog = 200
+        # Seconds of silence from the Growatt-side socket before the session is recycled
+        # (0 = disabled). Guards against zombie sessions that stay TCP-ESTABLISHED while
+        # the cloud has dropped its side (datalogger keeps pinging, nothing comes back).
+        self.idletimeout = 300
         self.tcpkeepidle = 60
         self.tcpkeepintvl = 10
         self.tcpkeepcnt = 3
@@ -154,6 +158,7 @@ class GrottConf:
                 self.connecttimeout = config.getfloat("Proxy", "connecttimeout", fallback=self.connecttimeout)
                 self.maxpending = config.getint("Proxy", "maxpending", fallback=self.maxpending)
                 self.maxparsebuf = config.getint("Proxy", "maxparsebuf", fallback=self.maxparsebuf)
+                self.idletimeout = config.getint("Proxy", "idletimeout", fallback=self.idletimeout)
                 self.backlog = config.getint("Proxy", "backlog", fallback=self.backlog)
                 self.tcpkeepidle = config.getint("Proxy", "tcpkeepidle", fallback=self.tcpkeepidle)
                 self.tcpkeepintvl = config.getint("Proxy", "tcpkeepintvl", fallback=self.tcpkeepintvl)

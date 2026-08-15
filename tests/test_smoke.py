@@ -339,6 +339,62 @@ def test_resync_after_trailer():
     check("scan-resync recovers the record after an unparseable trailer", calls == [600, 600], f"calls={calls}")
 
 
+def test_idle_timeout_recycles_zombie_session():
+    """A session whose Growatt side goes silent is recycled (zombie-session watchdog).
+
+    Reproduces the 2026-08-15 incident: the cloud-side socket stays TCP-ESTABLISHED
+    but delivers no data for hours while the datalogger keeps pinging (cloud LED on,
+    yet no MQTT and no cloud data). The watchdog must close the pair after
+    ``idletimeout`` seconds of server-side silence.
+    """
+    srv_ready = threading.Event()
+
+    def fake_growatt():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", SERVER_PORT + 5))
+        srv.listen(1)
+        srv_ready.set()
+        srv.settimeout(15)
+        conn, _ = srv.accept()
+        conn.settimeout(15)
+        try:
+            while conn.recv(4096):  # Sink the datalogger's pings; never send anything back.
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            srv.close()
+
+    threading.Thread(target=fake_growatt, daemon=True).start()
+    srv_ready.wait(10)
+
+    conf = make_conf(grottport=PROXY_PORT + 5, growattport=SERVER_PORT + 5, idletimeout=1)
+    proxy = Proxy(conf)
+    check("proxy picks up idletimeout", proxy.idle_timeout == 1)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 5), timeout=10)
+    client.settimeout(10)
+    client.sendall(make_record(0x51, rectype=0x16, total_len=20))  # ping, relayed to the fake server
+    time.sleep(0.5)
+    # Sanity: session alive while fresh; the watchdog only fires after idle_timeout of silence.
+    check("fresh session not yet recycled", len(proxy.channel) == 2, f"channel={len(proxy.channel)}")
+    # No more traffic: after ~idletimeout + one select round the pair must be closed.
+    closed = wait_for(lambda: not proxy.channel, timeout=6)
+    check("silent server-side socket recycled by idle watchdog", closed)
+    try:
+        check("datalogger side of the pair was closed too", client.recv(4096) == b"")
+    except OSError:
+        check("datalogger side of the pair was closed too", True)
+
+    client.close()
+    time.sleep(0.3)
+    proxy.shutdown()
+
+
 def test_timesync():
     """After an announce the proxy sets the datalogger clock (type 18, register 31)."""
     loggerid = b"KWK1CK53HV"
@@ -378,6 +434,76 @@ def test_timesync():
           bytes.fromhex(plain_cmd[84:88]).decode() == "20")
 
 
+def test_timesync_response_withheld_from_cloud():
+    """The datalogger's answer to our injected time command never reaches Growatt.
+
+    The response (type 18) carries an undeclared encrypted trailer that must be
+    swallowed too, even when it is split across TCP chunks. Everything else on the
+    uplink (announce, data records) keeps flowing to the server.
+    """
+    loggerid = b"KWK1CK53HV"
+    payload = loggerid + bytes(200)
+    datalength = 2 + len(payload)
+    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
+    masked = bytes.fromhex(decrypt(plain))
+    announce = masked + calc_crc(masked).to_bytes(2, "big")
+
+    response18 = make_record(0x0001, rectype=0x18, total_len=43)  # answer to the injected command
+    trailer = b"\xff" * 796                                       # its undeclared encrypted trailer
+    data_rec = make_record(0x52, rectype=0x04, total_len=600)
+    expected_rx = announce + data_rec                             # what the cloud may see
+
+    results = {"rx": b""}
+    srv_ready, srv_done = threading.Event(), threading.Event()
+
+    def fake_growatt():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", SERVER_PORT + 8))
+        srv.listen(1)
+        srv_ready.set()
+        srv.settimeout(15)
+        conn, _ = srv.accept()
+        conn.settimeout(15)
+        try:
+            while len(results["rx"]) < len(expected_rx):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                results["rx"] += chunk
+        finally:
+            conn.close()
+            srv.close()
+            srv_done.set()
+
+    threading.Thread(target=fake_growatt, daemon=True).start()
+    srv_ready.wait(10)
+
+    conf = make_conf(grottport=PROXY_PORT + 8, growattport=SERVER_PORT + 8, timesync=True)
+    proxy = Proxy(conf)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 8), timeout=10)
+    client.settimeout(10)
+    client.sendall(announce)
+    wait_for(lambda: results["rx"], timeout=5)          # announce relayed raw (pre-injection)
+    wait_for(lambda: proxy.timesynced, timeout=5)       # proxy injected the time command
+    client.sendall(response18 + trailer[:400])          # response + first trailer chunk
+    time.sleep(0.5)
+    client.sendall(trailer[400:] + data_rec)            # rest of trailer, then a live data record
+    wait_for(lambda: len(results["rx"]) >= len(expected_rx), timeout=5)
+    srv_done.wait(15)
+    client.close()
+    time.sleep(0.3)
+    proxy.shutdown()
+
+    check("timesync response and its trailer withheld from the cloud", results["rx"] == expected_rx,
+          f"rx={len(results['rx'])}/{len(expected_rx)}")
+    check("timesync response squelched exactly once per session",
+          len(proxy.squelched) == 0 and len(proxy.swallow_trailer) == 0)  # cleaned up on close
+
+
 def test_malformed_records_dont_corrupt_stream():
     """An implausibly short record (reclength<8) is treated as noise, not an IndexError crash."""
     # protocol 0x02, datalength=1 -> reclength=7: used to raise IndexError on record[7].
@@ -388,12 +514,12 @@ def test_malformed_records_dont_corrupt_stream():
     orig = grottproxy.procdata
     grottproxy.procdata = lambda conf, data: calls.append(len(data))
 
-    conf = make_conf(grottport=PROXY_PORT + 7, noforward=True)
+    conf = make_conf(grottport=PROXY_PORT + 9, noforward=True)
     proxy = Proxy(conf)
     threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
     time.sleep(0.3)
 
-    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 7), timeout=10)
+    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 9), timeout=10)
     client.settimeout(10)
     client.sendall(tiny + good)
     wait_for(lambda: calls)
@@ -487,7 +613,9 @@ if __name__ == "__main__":
     test_noforward()
     test_growatt_down_fallback()
     test_resync_after_trailer()
+    test_idle_timeout_recycles_zombie_session()
     test_timesync()
+    test_timesync_response_withheld_from_cloud()
     test_malformed_records_dont_corrupt_stream()
     test_resync_bounded()
     test_mqtt_publish_never_blocks_the_caller()
