@@ -62,7 +62,7 @@ def make_conf(**overrides):
         mqttuser="u", mqttpsw="p", mqttretain=False, nomqtt=True, inverterid="grott",
         minrecl=100, mindatarec=12, datarec=["04", "50"], smartmeterrec=["1b", "20", "1e"],
         includeall=True, gtime="server", sendbuf=False,
-        blockcmd=False, noforward=False, fallback=True, fallbackretry=300,
+        blockcmd=False, noforward=False, fallback=True, fallbackretry=300, forwardinterval=0,
         buffersize=64, selecttimeout=0.2, connecttimeout=5.0,
         maxpending=1048576, maxparsebuf=1048576, backlog=10,
         tcpkeepidle=60, tcpkeepintvl=10, tcpkeepcnt=3,
@@ -338,6 +338,72 @@ def test_resync_after_trailer():
     check("scan-resync recovers the record after an unparseable trailer", calls == [600, 600], f"calls={calls}")
 
 
+def test_forward_interval():
+    """Throttle: first data record reaches Growatt, the next is withheld and ACKed locally."""
+    rec1 = make_record(0x51, rectype=0x04, total_len=600)
+    rec2 = make_record(0x52, rectype=0x04, total_len=600)
+
+    calls = []
+    orig = grottproxy.procdata
+    grottproxy.procdata = lambda conf, data: calls.append(len(data))
+
+    results = {"rx": b""}
+    ready, done = threading.Event(), threading.Event()
+
+    def fake_growatt():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", SERVER_PORT + 5))
+        srv.listen(1)
+        ready.set()
+        srv.settimeout(15)
+        conn, _ = srv.accept()
+        conn.settimeout(0.5)
+        t_end = time.time() + 2.5  # collect long enough to prove rec2 never arrives
+        try:
+            while time.time() < t_end:
+                try:
+                    data = conn.recv(4096)
+                except TimeoutError:
+                    continue
+                if not data:
+                    break
+                results["rx"] += data
+        finally:
+            conn.close()
+            srv.close()
+            done.set()
+
+    threading.Thread(target=fake_growatt, daemon=True).start()
+    ready.wait(10)
+
+    conf = make_conf(grottport=PROXY_PORT + 5, growattport=SERVER_PORT + 5, forwardinterval=300)
+    proxy = Proxy(conf)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    client = socket.create_connection(("127.0.0.1", PROXY_PORT + 5), timeout=10)
+    client.settimeout(10)
+    client.sendall(rec1)
+    time.sleep(0.3)
+    client.sendall(rec2)
+    expected_ack = rec2[0:4] + b"\x00\x03" + rec2[6:8] + b"\x47"
+    expected_ack += calc_crc(expected_ack).to_bytes(2, "big")
+    ack = b""
+    while len(ack) < len(expected_ack):
+        ack += client.recv(4096)
+    done.wait(15)
+    client.close()
+    time.sleep(0.3)
+    proxy.shutdown()
+    grottproxy.procdata = orig
+
+    check("forwardinterval: only the first record reached Growatt", results["rx"] == rec1,
+          f"rx={len(results['rx'])}B")
+    check("forwardinterval: withheld record ACKed locally", ack == expected_ack)
+    check("forwardinterval: both records still published to MQTT", calls == [600, 600], f"calls={calls}")
+
+
 def test_mqtt():
     """Publishes through a fake broker and fails fast when no broker listens."""
     got = {"raw": b""}
@@ -392,6 +458,7 @@ if __name__ == "__main__":
     test_noforward()
     test_growatt_down_fallback()
     test_resync_after_trailer()
+    test_forward_interval()
     test_mqtt()
     print("RESULT:", "ALL TESTS PASSED" if not FAILURES else f"FAILED: {FAILURES}")
     sys.exit(1 if FAILURES else 0)

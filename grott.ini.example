@@ -44,6 +44,10 @@ noforward = False
 fallback = True
 ; seconds between attempts to restore the Growatt connection while in fallback
 fallbackretry = 300
+; minimum seconds between data records forwarded to Growatt (0 = forward all).
+; Lets the datalogger report every minute for local MQTT while the cloud sees a
+; 3-5 min cadence (skipped records are ACKed locally).
+forwardinterval = 0
 
 [Proxy]
 ; operational tuning of the TCP relay; defaults suit a handful of dataloggers

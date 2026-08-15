@@ -15,6 +15,8 @@ known_protocols = (0x00, 0x02, 0x05, 0x06)
 blocked_rectypes = (0x05, 0x06, 0x10, 0x18, 0x19)
 # Record types observed (ShineLink-X 7.x) to carry an undeclared encrypted trailer after the frame.
 trailer_rectypes = (0x29, 0x38)
+# Live data record types subject to the optional cloud forward-interval throttle.
+throttled_rectypes = (0x04, 0x1b, 0x1e, 0x20)
 
 
 def calc_crc(data):
@@ -168,6 +170,8 @@ class Proxy:
         self.noforward = conf.noforward
         self.fallback_enabled = conf.fallback
         self.fallback_retry = conf.fallbackretry
+        self.forward_interval = conf.forwardinterval
+        self.lastfwd = {}  # Socket -> {rectype: monotonic time of last record forwarded to Growatt}.
 
         # Operational tuning (grott.ini [Proxy] section).
         self.buffer_size = conf.buffersize
@@ -321,8 +325,9 @@ class Proxy:
             return
         peer = self.channel[sock]
 
-        # Raw passthrough, unless this direction is command-filtered (then forwarded per record).
-        if peer is not None and not (self.blockcmd and sock in self.serverside):
+        # Raw passthrough, unless this direction is forwarded per record (blockcmd or throttle).
+        throttling = self.forward_interval > 0 and peer is not None and sock not in self.serverside
+        if peer is not None and not (self.blockcmd and sock in self.serverside) and not throttling:
             self.queue_send(peer, data)
 
         # Record parsing: MQTT processing, filtered forwarding and local-mode ACKs.
@@ -362,6 +367,7 @@ class Proxy:
         buf = self.recvbuf.get(sock, b"") + data
         peer = self.channel.get(sock)
         filtering = self.blockcmd and sock in self.serverside and peer is not None
+        throttling = self.forward_interval > 0 and peer is not None and sock not in self.serverside
         localmode = peer is None  # No-forward mode or offline fallback: the proxy ACKs records.
 
         while len(buf) >= 8:
@@ -384,7 +390,7 @@ class Proxy:
                         "Unrecognized data stream from %s (%s): %d byte(s) skipped, head: %s",
                         origin, lastinfo, len(skipped), skipped[:32].hex(),
                     )
-                if filtering:
+                if filtering or throttling:
                     self.queue_send(peer, skipped)  # Fail open: an unparseable stream is never withheld.
                     if sock not in self.channel:
                         return
@@ -419,6 +425,23 @@ class Proxy:
                     logger.warning("Blocked remote command record (type %02x) towards datalogger", rectype)
                     continue
                 self.queue_send(peer, record)
+                if sock not in self.channel:
+                    return  # Pair closed while queueing.
+
+            if throttling:
+                if crc_ok and rectype in throttled_rectypes:
+                    now = time.monotonic()
+                    lastfwd = self.lastfwd.setdefault(sock, {})
+                    last_t = lastfwd.get(rectype)
+                    if last_t is None or now - last_t >= self.forward_interval:
+                        lastfwd[rectype] = now
+                        self.queue_send(peer, record)
+                    else:
+                        # Cloud-friendly cadence: withhold from Growatt, satisfy the datalogger locally.
+                        logger.debug("Record type %02x withheld from Growatt (forwardinterval), ACKed locally", rectype)
+                        self.queue_send(sock, build_ack(record))
+                else:
+                    self.queue_send(peer, record)
                 if sock not in self.channel:
                     return  # Pair closed while queueing.
 
@@ -470,6 +493,7 @@ class Proxy:
             self.serverside.discard(s)
             self.fallback_deadline.pop(s, None)
             self.lastrec.pop(s, None)
+            self.lastfwd.pop(s, None)
             try:
                 s.close()
             except OSError:
