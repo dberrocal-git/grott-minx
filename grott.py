@@ -120,6 +120,7 @@ class GrottConf:
         self.tcpkeepidle = 60
         self.tcpkeepintvl = 10
         self.tcpkeepcnt = 3
+        self.idletimeout = 180
 
         # MQTT tuning ([MQTT] section).
         self.mqttkeepalive = 60
@@ -160,6 +161,7 @@ class GrottConf:
                 self.tcpkeepidle = config.getint("Proxy", "tcpkeepidle", fallback=self.tcpkeepidle)
                 self.tcpkeepintvl = config.getint("Proxy", "tcpkeepintvl", fallback=self.tcpkeepintvl)
                 self.tcpkeepcnt = config.getint("Proxy", "tcpkeepcnt", fallback=self.tcpkeepcnt)
+                self.idletimeout = config.getint("Proxy", "idletimeout", fallback=self.idletimeout)
 
             if config.has_section("MQTT"):
                 self.mqttip = config.get("MQTT", "ip", fallback=self.mqttip)

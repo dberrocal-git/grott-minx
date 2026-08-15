@@ -76,6 +76,10 @@ backlog = 200
 tcpkeepidle = 60
 tcpkeepintvl = 10
 tcpkeepcnt = 3
+; idle watchdog: drop a datalogger session silent for this many seconds so it
+; reconnects fresh; detects black-holed sockets (expired NAT entries) that TCP
+; keepalive cannot catch; should exceed the datalogger report interval; 0 = off
+idletimeout = 180
 
 [MQTT]
 ; broker address and credentials

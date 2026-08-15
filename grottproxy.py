@@ -181,6 +181,9 @@ class Proxy:
     - Offline fallback (default on): when Growatt is unreachable the datalogger is
       served in local-ACK mode so MQTT keeps flowing; the session is recycled every
       ``fallbackretry`` seconds to re-attempt the cloud connection.
+    - Idle watchdog (idletimeout): a session silent for too long is dropped so the
+      datalogger reconnects fresh; TCP keepalive cannot catch black-holed sockets
+      (expired NAT entries) that a middlebox keeps answering.
     """
 
     def __init__(self, conf):
@@ -198,6 +201,7 @@ class Proxy:
         self.serverside = set()  # Sockets connected to the Growatt server.
         self.fallback_deadline = {}  # Fallback socket -> monotonic time to retry Growatt.
         self.lastrec = {}  # Socket -> (rectype, protocol, length) of the last parsed record.
+        self.lastio = {}  # Socket -> monotonic time of the last byte received (idle watchdog).
 
         self.blockcmd = conf.blockcmd
         self.noforward = conf.noforward
@@ -215,6 +219,7 @@ class Proxy:
         self.max_pending = conf.maxpending
         self.max_parsebuf = conf.maxparsebuf
         self.keepalive_opts = (conf.tcpkeepidle, conf.tcpkeepintvl, conf.tcpkeepcnt)
+        self.idle_timeout = conf.idletimeout
 
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -248,6 +253,18 @@ class Proxy:
             for sock in list(self.fallback_deadline):
                 if now >= self.fallback_deadline.get(sock, now + 1):
                     logger.info("Recycling local fallback session to re-attempt the Growatt connection")
+                    self.close_pair(sock)
+
+        # Idle watchdog: a fully silent session usually means a black-holed socket
+        # (expired NAT entry, half-dead server) that TCP keepalive cannot detect.
+        if self.idle_timeout > 0 and self.lastio:
+            now = time.monotonic()
+            for sock in list(self.lastio):
+                if sock not in self.serverside and now - self.lastio.get(sock, now) > self.idle_timeout:
+                    logger.warning(
+                        "Datalogger session idle for %.0fs (idletimeout %ds), recycling connection",
+                        now - self.lastio[sock], self.idle_timeout,
+                    )
                     self.close_pair(sock)
 
         writelist = [sock for sock, pending in self.sendbuf.items() if pending]
@@ -291,6 +308,7 @@ class Proxy:
         self.input_list.append(sock)
         self.recvbuf[sock] = b""
         self.sendbuf[sock] = b""
+        self.lastio[sock] = time.monotonic()
         self.channel[sock] = None
 
     def on_accept(self):
@@ -337,6 +355,7 @@ class Proxy:
             self.input_list.append(sock)
             self.recvbuf[sock] = b""
             self.sendbuf[sock] = b""
+            self.lastio[sock] = time.monotonic()
         self.channel[clientsock] = forward
         self.channel[forward] = clientsock
         self.serverside.add(forward)
@@ -355,6 +374,8 @@ class Proxy:
         if not data:
             self.close_pair(sock)
             return
+
+        self.lastio[sock] = time.monotonic()
 
         if sock not in self.channel:
             return
@@ -537,6 +558,7 @@ class Proxy:
             self.serverside.discard(s)
             self.fallback_deadline.pop(s, None)
             self.lastrec.pop(s, None)
+            self.lastio.pop(s, None)
             self.lastfwd.pop(s, None)
             self.timesynced.discard(s)
             try:
