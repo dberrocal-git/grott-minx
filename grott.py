@@ -120,6 +120,13 @@ class GrottConf:
         # (0 = disabled). Guards against zombie sessions that stay TCP-ESTABLISHED while
         # the cloud has dropped its side (datalogger keeps pinging, nothing comes back).
         self.idletimeout = 300
+        # Backoff for sessions recycled without ever receiving server data (bad cloud
+        # node): the recycle delay grows by idlebackoffmult per consecutive strike up
+        # to idlebackoffmax seconds, with +/-20% jitter.
+        self.idlebackoffmax = 1800
+        self.idlebackoffmult = 2.0
+        # Seconds between the periodic stats line in the log (0 = disabled).
+        self.statsinterval = 3600
         self.tcpkeepidle = 60
         self.tcpkeepintvl = 10
         self.tcpkeepcnt = 3
@@ -159,6 +166,9 @@ class GrottConf:
                 self.maxpending = config.getint("Proxy", "maxpending", fallback=self.maxpending)
                 self.maxparsebuf = config.getint("Proxy", "maxparsebuf", fallback=self.maxparsebuf)
                 self.idletimeout = config.getint("Proxy", "idletimeout", fallback=self.idletimeout)
+                self.idlebackoffmax = config.getint("Proxy", "idlebackoffmax", fallback=self.idlebackoffmax)
+                self.idlebackoffmult = config.getfloat("Proxy", "idlebackoffmult", fallback=self.idlebackoffmult)
+                self.statsinterval = config.getint("Proxy", "statsinterval", fallback=self.statsinterval)
                 self.backlog = config.getint("Proxy", "backlog", fallback=self.backlog)
                 self.tcpkeepidle = config.getint("Proxy", "tcpkeepidle", fallback=self.tcpkeepidle)
                 self.tcpkeepintvl = config.getint("Proxy", "tcpkeepintvl", fallback=self.tcpkeepintvl)

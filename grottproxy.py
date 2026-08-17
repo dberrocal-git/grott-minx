@@ -1,12 +1,14 @@
 """Transparent TCP proxy between Growatt dataloggers and the Growatt cloud."""
 
 import logging
+import random
 import select
 import socket
 import time
 from datetime import datetime
 from signal import SIG_DFL, SIGPIPE, signal
 
+import grottdata
 from grottdata import decrypt, format_multi_line, procdata
 
 logger = logging.getLogger(__name__)
@@ -228,6 +230,8 @@ class Proxy:
         self.fallback_deadline = {}  # Fallback socket -> monotonic time to retry Growatt.
         self.lastrec = {}  # Socket -> (rectype, protocol, length) of the last parsed record.
         self.lastio = {}  # Socket -> monotonic time of the last byte seen on that socket.
+        self.born = {}  # Socket -> monotonic time the session was established.
+        self.idle_strikes = {}  # Datalogger addr -> consecutive idle-recycles without server data.
 
         self.blockcmd = conf.blockcmd
         self.noforward = conf.noforward
@@ -245,7 +249,20 @@ class Proxy:
         self.max_pending = conf.maxpending
         self.max_parsebuf = conf.maxparsebuf
         self.idle_timeout = getattr(conf, "idletimeout", 0)  # 0 = disabled.
+        # Backoff for sessions recycled without ever receiving server data: the delay
+        # grows by idlebackoffmult per consecutive strike up to idlebackoffmax, with
+        # +/-20% jitter so the re-announce cadence never looks mechanically timed.
+        self.idle_backoff_max = getattr(conf, "idlebackoffmax", 1800)
+        self.idle_backoff_mult = getattr(conf, "idlebackoffmult", 2.0)
+        self.stats_interval = getattr(conf, "statsinterval", 3600)  # 0 = disabled.
         self.keepalive_opts = (conf.tcpkeepidle, conf.tcpkeepintvl, conf.tcpkeepcnt)
+
+        # Runtime counters, reported by the periodic stats line and reset each interval.
+        self.stats = {
+            "sessions": 0, "resets": 0, "idle_recycles": 0,
+            "fallbacks": 0, "records": 0, "blocked": 0,
+        }
+        self.stats_due = time.monotonic() + self.stats_interval if self.stats_interval > 0 else None
 
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -288,12 +305,28 @@ class Proxy:
         if self.idle_timeout > 0:
             for sock in list(self.serverside):
                 silent_for = now - self.lastio.get(sock, now)
-                if silent_for >= self.idle_timeout:
+                delay = self.idle_recycle_delay(sock)
+                if silent_for >= delay:
                     logger.warning(
                         "No data from Growatt server for %ds (idle timeout %ds), recycling session",
-                        int(silent_for), self.idle_timeout,
+                        int(silent_for), int(delay),
                     )
+                    self.stats["idle_recycles"] += 1
                     self.close_pair(sock)
+
+        if self.stats_due is not None and now >= self.stats_due:
+            mqtt_enqueued = grottdata.enqueued_publishes
+            grottdata.enqueued_publishes = 0
+            logger.info(
+                "Stats last %ds: sessions=%d resets=%d idle_recycles=%d fallbacks=%d "
+                "records=%d mqtt=%d blocked=%d",
+                self.stats_interval, self.stats["sessions"], self.stats["resets"],
+                self.stats["idle_recycles"], self.stats["fallbacks"], self.stats["records"],
+                mqtt_enqueued, self.stats["blocked"],
+            )
+            for key in self.stats:
+                self.stats[key] = 0
+            self.stats_due = now + self.stats_interval
 
         writelist = [sock for sock, pending in self.sendbuf.items() if pending]
         try:
@@ -329,6 +362,32 @@ class Proxy:
             if dead:
                 self.close_pair(sock)
 
+    def idle_recycle_delay(self, serversock):
+        """Seconds of server-side silence before *serversock*'s session is recycled.
+
+        Equals ``idle_timeout`` for a healthy session; grows with a jittered backoff
+        when previous sessions from the same datalogger were recycled without ever
+        receiving a single byte from the server (a bad cloud node keeps accepting
+        connections but never speaks). The strike counter resets as soon as any
+        session from that datalogger receives server data.
+
+        Args:
+            serversock: The Growatt-side socket of the session.
+
+        Returns:
+            The silence threshold in seconds.
+        """
+        peer = self.channel.get(serversock)
+        try:
+            addr = peer.getpeername()[0] if peer is not None else None
+        except OSError:
+            addr = None
+        strikes = self.idle_strikes.get(addr, 0)
+        if strikes <= 0:
+            return self.idle_timeout
+        delay = min(self.idle_timeout * self.idle_backoff_mult ** strikes, self.idle_backoff_max)
+        return delay * random.uniform(0.8, 1.2)
+
     def _register_local(self, sock):
         """Registers a datalogger connection served locally (no Growatt peer)."""
         sock.setblocking(False)
@@ -336,7 +395,10 @@ class Proxy:
         self.input_list.append(sock)
         self.recvbuf[sock] = b""
         self.sendbuf[sock] = b""
-        self.lastio[sock] = time.monotonic()
+        now = time.monotonic()
+        self.lastio[sock] = now
+        self.born[sock] = now
+        self.stats["sessions"] += 1
         self.channel[sock] = None
 
     def on_accept(self):
@@ -372,12 +434,14 @@ class Proxy:
                 "(records ACKed locally, published to MQTT only); retry in %ss",
                 clientaddr, self.fallback_retry,
             )
+            self.stats["fallbacks"] += 1
             self._register_local(clientsock)
             self.fallback_deadline[clientsock] = time.monotonic() + self.fallback_retry
             return
 
         logger.info("Client connection from: %s", clientaddr)
         now = time.monotonic()
+        self.stats["sessions"] += 1
         for sock in (clientsock, forward):
             sock.setblocking(False)
             set_keepalive(sock, *self.keepalive_opts)
@@ -385,6 +449,7 @@ class Proxy:
             self.recvbuf[sock] = b""
             self.sendbuf[sock] = b""
             self.lastio[sock] = now
+            self.born[sock] = now
         self.channel[clientsock] = forward
         self.channel[forward] = clientsock
         self.serverside.add(forward)
@@ -396,6 +461,7 @@ class Proxy:
         except (BlockingIOError, InterruptedError):
             return
         except OSError as e:
+            self.stats["resets"] += 1
             logger.warning("Connection error: %s", e)
             self.close_pair(sock)
             return
@@ -409,6 +475,15 @@ class Proxy:
         if sock not in self.channel:
             return
         peer = self.channel[sock]
+
+        # Any byte from the Growatt server proves the session is alive: reset the
+        # consecutive-idle-recycle counter for this datalogger (see idle_recycle_delay).
+        if sock in self.serverside:
+            try:
+                addr = peer.getpeername()[0] if peer is not None else None
+            except OSError:
+                addr = None
+            self.idle_strikes.pop(addr, None)
 
         # Raw passthrough, unless this direction is forwarded per record: server->datalogger
         # when blockcmd filters commands, datalogger->server once we injected a timesync
@@ -525,6 +600,7 @@ class Proxy:
 
                 if perrecord:
                     if filtering and crc_ok and rectype in blocked_rectypes:
+                        self.stats["blocked"] += 1
                         logger.warning("Blocked remote command record (type %02x) towards datalogger", rectype)
                         continue
                     if squelching and crc_ok and rectype == 0x18 and sock not in self.squelched:
@@ -566,6 +642,7 @@ class Proxy:
 
             # Process only records longer than minrecl; guarded so a bad record never stops the relay.
             if len(record) > conf.minrecl:
+                self.stats["records"] += 1
                 try:
                     procdata(conf, record)
                 except Exception:
@@ -587,13 +664,26 @@ class Proxy:
         if peer is not None:
             self.channel.pop(peer, None)
 
+        # A session recycled without a single byte from the server counts as a strike
+        # against its datalogger: the next session's idle-recycle delay backs off.
+        if sock in self.serverside and sock in self.born and self.lastio.get(sock) == self.born.get(sock):
+            try:
+                addr = peer.getpeername()[0] if peer is not None else None
+            except OSError:
+                addr = None
+            self.idle_strikes[addr] = self.idle_strikes.get(addr, 0) + 1
+
         for s in (sock, peer):
             if s is None:
                 continue
+            age = time.monotonic() - self.born.get(s, time.monotonic())
             try:
-                logger.info("%s disconnected", s.getpeername())
+                logger.info("%s disconnected after %ds", s.getpeername(), int(age))
             except OSError:
-                logger.info("Peer already disconnected")
+                # Peer already gone: only log it when it is not the trailing half of a
+                # reset already reported by on_read (which logs the error itself).
+                if s is not sock:
+                    logger.debug("Peer already disconnected")
             if s in self.input_list:
                 self.input_list.remove(s)
             self.recvbuf.pop(s, None)
@@ -602,6 +692,7 @@ class Proxy:
             self.fallback_deadline.pop(s, None)
             self.lastrec.pop(s, None)
             self.lastio.pop(s, None)
+            self.born.pop(s, None)
             self.timesynced.discard(s)
             self.squelched.discard(s)
             self.swallow_trailer.discard(s)

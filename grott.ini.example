@@ -70,6 +70,14 @@ maxparsebuf = 1048576
 ; silently dropped its side: the datalogger keeps pinging, nothing comes back.
 ; Data records arrive every 1-5 min in healthy operation.
 idletimeout = 300
+; when recycled sessions never receive a single byte from the server (bad cloud
+; node), the recycle delay grows by this factor per consecutive strike, up to
+; idlebackoffmax seconds, with +/-20% jitter so the cadence never looks mechanical
+idlebackoffmult = 2.0
+idlebackoffmax = 1800
+; seconds between the periodic stats line in the log (sessions, resets, idle
+; recycles, fallbacks, records, MQTT publishes, blocked commands); 0 disables it
+statsinterval = 3600
 ; maximum number of queued, not-yet-accepted incoming connections (listen backlog)
 backlog = 200
 ; TCP keepalive: after tcpkeepidle seconds of silence probe every tcpkeepintvl seconds;

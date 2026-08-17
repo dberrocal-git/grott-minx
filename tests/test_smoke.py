@@ -65,7 +65,8 @@ def make_conf(**overrides):
         blockcmd=False, noforward=False, fallback=True, fallbackretry=300,
         timesync=False,
         buffersize=64, selecttimeout=0.2, connecttimeout=5.0,
-        maxpending=1048576, maxparsebuf=1048576, backlog=10,
+        maxpending=1048576, maxparsebuf=1048576, backlog=10, idletimeout=300,
+        idlebackoffmax=1800, idlebackoffmult=2.0, statsinterval=3600,
         tcpkeepidle=60, tcpkeepintvl=10, tcpkeepcnt=3,
         mqttkeepalive=60, mqttpublishtimeout=2.0, mqttreconnectmin=1, mqttreconnectmax=30,
         recorddict={
@@ -395,6 +396,111 @@ def test_idle_timeout_recycles_zombie_session():
     proxy.shutdown()
 
 
+def test_idle_recycle_backoff():
+    """Sessions recycled without any server data back off; server data resets the strikes."""
+    conf = make_conf(idletimeout=300, idlebackoffmult=2.0, idlebackoffmax=1800)
+    proxy = Proxy.__new__(Proxy)  # Pure-logic test: no sockets, no bind.
+    proxy.channel = {}
+    proxy.born = {}
+    proxy.lastio = {}
+    proxy.serverside = set()
+    proxy.idle_strikes = {}
+    proxy.idle_timeout = conf.idletimeout
+    proxy.idle_backoff_max = conf.idlebackoffmax
+    proxy.idle_backoff_mult = conf.idlebackoffmult
+
+    class FakeSock:
+        def __init__(self, addr):
+            self.addr = addr
+
+        def getpeername(self):
+            return (self.addr, 5279)
+
+    client = FakeSock("10.7.1.10")
+    server = FakeSock("47.254.130.145")
+    proxy.channel[client] = server
+    proxy.channel[server] = client
+    proxy.serverside.add(server)
+
+    # Healthy session: no strikes -> plain idle_timeout.
+    check("no strikes gives plain idletimeout", proxy.idle_recycle_delay(server) == 300)
+
+    # Session recycled without a single server byte: lastio == born -> strike.
+    now = time.monotonic()
+    proxy.born[server] = now
+    proxy.lastio[server] = now
+    proxy.born[client] = now
+    proxy.lastio[client] = now
+    proxy.idle_strikes["10.7.1.10"] = proxy.idle_strikes.get("10.7.1.10", 0) + 1
+    delay = proxy.idle_recycle_delay(server)
+    check("one strike doubles the delay (with jitter)", 480 <= delay <= 720, f"delay={delay}")
+
+    proxy.idle_strikes["10.7.1.10"] = 10  # Many strikes: capped at idlebackoffmax (+jitter).
+    delay = proxy.idle_recycle_delay(server)
+    check("delay capped at idlebackoffmax (+jitter)", 1440 <= delay <= 2160, f"delay={delay}")
+
+
+def test_stats_line_and_session_age():
+    """The periodic stats line reports counters and close_pair logs the session age."""
+    srv_ready = threading.Event()
+
+    def fake_growatt():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", SERVER_PORT + 10))
+        srv.listen(1)
+        srv_ready.set()
+        srv.settimeout(15)
+        conn, _ = srv.accept()
+        conn.settimeout(15)
+        try:
+            while conn.recv(4096):
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            srv.close()
+
+    threading.Thread(target=fake_growatt, daemon=True).start()
+    srv_ready.wait(10)
+
+    conf = make_conf(grottport=PROXY_PORT + 10, growattport=SERVER_PORT + 10, statsinterval=1)
+    proxy = Proxy(conf)
+    check("proxy picks up statsinterval", proxy.stats_interval == 1)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    records = []
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Handler()
+    proxy_logger = logging.getLogger("grottproxy")
+    old_level = proxy_logger.level
+    proxy_logger.setLevel(logging.INFO)  # The stats line and session age are INFO.
+    proxy_logger.addHandler(handler)
+    try:
+        client = socket.create_connection(("127.0.0.1", PROXY_PORT + 10), timeout=10)
+        client.settimeout(10)
+        client.sendall(make_record(0x61, rectype=0x16, total_len=20))
+        time.sleep(0.5)
+        client.close()
+        # Wait for at least one stats line (interval is 1s + select pace).
+        got_stats = wait_for(lambda: any(m.startswith("Stats last") for m in records), timeout=6)
+        check("periodic stats line emitted", got_stats)
+        stats_line = next((m for m in records if m.startswith("Stats last")), "")
+        check("stats line reports sessions", "sessions=1" in stats_line, f"line={stats_line!r}")
+        check("close_pair logs session age", any("disconnected after" in m for m in records),
+              f"messages={records!r}")
+    finally:
+        proxy_logger.removeHandler(handler)
+        proxy_logger.setLevel(old_level)
+        proxy.shutdown()
+
+
 def test_timesync():
     """After an announce the proxy sets the datalogger clock (type 18, register 31)."""
     loggerid = b"KWK1CK53HV"
@@ -614,6 +720,8 @@ if __name__ == "__main__":
     test_growatt_down_fallback()
     test_resync_after_trailer()
     test_idle_timeout_recycles_zombie_session()
+    test_idle_recycle_backoff()
+    test_stats_line_and_session_age()
     test_timesync()
     test_timesync_response_withheld_from_cloud()
     test_malformed_records_dont_corrupt_stream()

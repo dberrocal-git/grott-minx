@@ -201,6 +201,8 @@ _mqtt_publisher = None
 _publish_queue = None
 _publish_worker = None
 _PUBLISH_QUEUE_MAXSIZE = 200
+# Messages handed to the publish worker since the counter was last reset (proxy stats line).
+enqueued_publishes = 0
 
 
 def _publish_worker_loop(timeout):
@@ -251,8 +253,10 @@ def _enqueue_publish(conf, topic, payload, retain, deviceid):
     warning is logged instead of piling up unbounded memory or stalling.
     """
     _get_mqtt_publisher(conf)
+    global enqueued_publishes
     try:
         _publish_queue.put_nowait((topic, payload, retain, deviceid))
+        enqueued_publishes += 1
     except queue.Full:
         logger.warning("MQTT publish queue full (broker unresponsive?), dropping message for deviceid: %s", deviceid)
 
