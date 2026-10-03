@@ -85,6 +85,8 @@ class MQTTPublisher:
         self._lock = threading.Lock()
         self._started = False
         self._closing = False
+        self._drop_lock = threading.Lock()
+        self._dropped = 0  # Messages dropped since the broker went away; summarized on reconnect.
 
         try:
             # paho-mqtt >= 2.0
@@ -110,7 +112,14 @@ class MQTTPublisher:
             logger.warning("MQTT connection refused by %s:%s (rc=%s)", self.hostname, self.port, reason_code)
             return
         self._connected.set()
-        logger.info("MQTT connected to %s:%s", self.hostname, self.port)
+        with self._drop_lock:
+            dropped, self._dropped = self._dropped, 0
+        if dropped:
+            logger.info(
+                "MQTT connected to %s:%s (%d message(s) dropped while disconnected)", self.hostname, self.port, dropped
+            )
+        else:
+            logger.info("MQTT connected to %s:%s", self.hostname, self.port)
 
     def _on_disconnect(self, _client, _userdata, *_args):
         self._connected.clear()
@@ -151,9 +160,17 @@ class MQTTPublisher:
             self.start()
 
         if not self._connected.wait(timeout):
-            logger.warning(
-                "MQTT broker %s:%s not connected, message for topic %s dropped", self.hostname, self.port, topic
-            )
+            with self._drop_lock:
+                self._dropped += 1
+                first = self._dropped == 1
+            if first:
+                logger.warning(
+                    "MQTT broker %s:%s not connected, dropping messages until it reconnects", self.hostname, self.port
+                )
+            else:
+                logger.debug(
+                    "MQTT broker %s:%s not connected, message for topic %s dropped", self.hostname, self.port, topic
+                )
             return False
 
         try:
@@ -201,8 +218,23 @@ _mqtt_publisher = None
 _publish_queue = None
 _publish_worker = None
 _PUBLISH_QUEUE_MAXSIZE = 200
-# Messages handed to the publish worker since the counter was last reset (proxy stats line).
-enqueued_publishes = 0
+# Publish outcomes since the proxy stats line last read them (see take_publish_stats).
+_publish_stats = {"published": 0, "dropped": 0}
+_publish_stats_lock = threading.Lock()
+
+
+def _count_publish(outcome):
+    """Counts one publish outcome ("published" or "dropped") for the stats line."""
+    with _publish_stats_lock:
+        _publish_stats[outcome] += 1
+
+
+def take_publish_stats():
+    """Returns and resets the MQTT ``(published, dropped)`` counters (proxy stats line)."""
+    with _publish_stats_lock:
+        counts = (_publish_stats["published"], _publish_stats["dropped"])
+        _publish_stats["published"] = _publish_stats["dropped"] = 0
+    return counts
 
 
 def _publish_worker_loop(timeout):
@@ -214,12 +246,12 @@ def _publish_worker_loop(timeout):
         topic, payload, retain, deviceid = item
         try:
             success = _mqtt_publisher.publish(topic=topic, payload=payload, qos=0, retain=retain, timeout=timeout)
-            if success:
-                logger.debug("MQTT message published for deviceid: %s", deviceid)
-            else:
-                logger.error("MQTT message publishing failed for deviceid: %s", deviceid)
         except Exception:
             logger.exception("Grott MQTT publish error for deviceid: %s", deviceid)
+            success = False
+        _count_publish("published" if success else "dropped")
+        # On failure publish() already logged the cause (once per outage while disconnected).
+        logger.debug("MQTT message %s for deviceid: %s", "published" if success else "dropped", deviceid)
 
 
 def _get_mqtt_publisher(conf):
@@ -253,11 +285,10 @@ def _enqueue_publish(conf, topic, payload, retain, deviceid):
     warning is logged instead of piling up unbounded memory or stalling.
     """
     _get_mqtt_publisher(conf)
-    global enqueued_publishes
     try:
         _publish_queue.put_nowait((topic, payload, retain, deviceid))
-        enqueued_publishes += 1
     except queue.Full:
+        _count_publish("dropped")
         logger.warning("MQTT publish queue full (broker unresponsive?), dropping message for deviceid: %s", deviceid)
 
 

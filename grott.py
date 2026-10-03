@@ -3,6 +3,7 @@
 import configparser
 import logging
 import os
+import signal
 import socket
 import sys
 
@@ -407,12 +408,26 @@ conf = GrottConf()
 # Apply the configured level to the root logger so all module loggers inherit it.
 logging.getLogger().setLevel(getattr(logging, conf.loglevel.upper(), logging.INFO))
 
+
+class Terminated(BaseException):
+    """Raised by the SIGTERM handler; BaseException so the relay loop's catch-all lets it through."""
+
+
+def _on_sigterm(_signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)  # A second SIGTERM kills outright.
+    raise Terminated
+
+
+signal.signal(signal.SIGTERM, _on_sigterm)
+
 proxy = None
 try:
     proxy = Proxy(conf)
     proxy.main(conf)
 except KeyboardInterrupt:
     logger.info("Grott stopped by user")
+except Terminated:
+    logger.info("Grott stopped by SIGTERM (service stop/restart or host shutdown)")
 except Exception:
     logger.exception("Grott stopped due to an unexpected error")
     sys.exit(1)

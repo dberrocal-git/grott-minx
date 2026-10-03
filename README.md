@@ -258,6 +258,7 @@ server configured in `[Growatt]`.
 | `[Proxy] maxpending / maxparsebuf` | `1 MiB` | Outbound queue / parse buffer caps |
 | `[Proxy] backlog` | `200` | Listen backlog |
 | `[Proxy] tcpkeepidle / tcpkeepintvl / tcpkeepcnt` | `60 / 10 / 3` | TCP keepalive tuning |
+| `[Proxy] statsinterval` | `3600` | Seconds between [stats lines](#log-output) in the log (`0` disables them) |
 | `[MQTT] ip / port / topic / user / password` | — | Broker connection and topic |
 | `[MQTT] retain / nomqtt` | `False` | Retain flag / disable publishing |
 | `[MQTT] keepalive` | `60` | MQTT keepalive (s) |
@@ -302,8 +303,11 @@ not configuration.
   has delivered no data for that many seconds (0 disables it). Guards against zombie
   sessions that stay TCP-ESTABLISHED while the cloud has silently dropped its side:
   the datalogger keeps pinging (its cloud LED stays on) but nothing flows either way.
-  In healthy operation the server answers within seconds, so 5 minutes of silence is
-  always abnormal. The datalogger re-announces automatically after the recycle.
+  In healthy operation the server answers within seconds, so 5 minutes of silence on
+  the live session is always abnormal. The datalogger re-announces automatically after
+  the recycle. A session the datalogger has already replaced with a newer connection
+  goes quiet as expected: it is closed the same way but logged as stale, not as a fault
+  (see [Log output](#log-output)).
 
 ### Published payload
 
@@ -315,6 +319,51 @@ not configuration.
   "values": { "pvstatus": 1, "pvpowerin": 12345, "pv1voltage": 2381, "...": 0 }
 }
 ```
+
+## Log output
+
+At the default `INFO` level the log is written for humans: routine events are `INFO`,
+and every `WARNING` deserves a look.
+
+- **One line per session** when it ends: datalogger address, session age, why it
+  ended and what each side sent (bytes, and seconds since the last one), which shows
+  which side went silent first:
+
+  ```text
+  INFO: Session ('192.168.1.20', 49181) closed after 277s (stale, datalogger reconnected as ('192.168.1.20', 49182); [Errno 104] Connection reset by peer): datalogger sent 1290 B (last 234s ago), server sent 186 B (last 233s ago)
+  WARNING: Session ('192.168.1.20', 49233) closed after 93s (datalogger error: [Errno 110] Operation timed out): datalogger sent 40 B (last 90s ago), server sent nothing
+  ```
+
+- **Stale sessions are not faults.** The datalogger routinely opens a new connection
+  without closing the previous one (the ShineLink-X here also reboots itself once a
+  day), and the old one dies minutes later from a reset, a keepalive timeout or the
+  idle watchdog. When a newer session from the same datalogger IP exists, that end is
+  logged at `INFO` as `stale` and counted as `superseded`; errors on the live session
+  stay `WARNING`.
+- **Periodic stats line** every `[Proxy] statsinterval` seconds (counters reset each
+  time):
+
+  ```text
+  INFO: Stats last 3600s: sessions=1 superseded=1 resets=0 idle_recycles=0 fallbacks=0 records=693 mqtt=503 mqtt_dropped=0 blocked=0
+  ```
+
+  | Field | Meaning |
+  |---|---|
+  | `sessions` | Datalogger connections accepted |
+  | `superseded` | Stale sessions closed after the datalogger reconnected (expected) |
+  | `resets` | Unexpected connection errors, either side |
+  | `idle_recycles` | Live sessions recycled by the idle watchdog (`idletimeout`) |
+  | `fallbacks` | Connections served locally because Growatt was unreachable |
+  | `records` | Valid records longer than `minrecl` handed to the decoder |
+  | `mqtt` / `mqtt_dropped` | Messages published / dropped (broker down, queue full) |
+  | `blocked` | Remote commands dropped by `blockcmd` |
+
+- **MQTT outages** log a single warning when publishing starts failing; the reconnect
+  line then reports how many messages were dropped in between.
+- **Stops are logged** as `Grott stopped by SIGTERM`, so a restart in the log is never
+  unexplained.
+- **CRC mismatches** name the record type, length and origin; such records are still
+  relayed but never published.
 
 ## Deployment
 
@@ -332,6 +381,8 @@ ready-to-use templates are in [`deploy/`](deploy/) (`grott.openrc`,
   not — covers hangs, not just crashes
 - stdout/stderr → `/var/log/grott.log`, rotated by logrotate
   (`copytruncate`, 10 MB × 5, `/etc/logrotate.d/grott`)
+- **Clean stop**: on SIGTERM (`rc-service grott stop|restart`, host shutdown) every
+  connection and the MQTT session are closed before the process exits
 
 ```sh
 rc-service grott start|stop|restart|status

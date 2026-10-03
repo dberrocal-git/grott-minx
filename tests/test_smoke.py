@@ -6,8 +6,12 @@ all checks passed. Run with: ``uv run python tests/test_smoke.py``.
 
 import json
 import logging
+import signal
 import socket
+import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -16,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 logging.basicConfig(level=logging.WARNING)
 
+import grottdata
 import grottproxy
 from grottdata import MQTTPublisher, decrypt, procdata, shutdown_mqtt
 from grottproxy import Proxy, build_ack, calc_crc, find_next_header
@@ -109,7 +114,6 @@ def test_relay_and_procdata():
     published = []
     orig_dumps = json.dumps
 
-    import grottdata
     grottdata.json.dumps = lambda obj: (published.append(obj), orig_dumps(obj))[1]
 
     results = {"rx": b"", "client_got": b""}
@@ -493,12 +497,96 @@ def test_stats_line_and_session_age():
         check("periodic stats line emitted", got_stats)
         stats_line = next((m for m in records if m.startswith("Stats last")), "")
         check("stats line reports sessions", "sessions=1" in stats_line, f"line={stats_line!r}")
-        check("close_pair logs session age", any("disconnected after" in m for m in records),
+        check("stats line reports superseded sessions and dropped MQTT messages",
+              "superseded=0" in stats_line and "mqtt_dropped=0" in stats_line, f"line={stats_line!r}")
+        summary = next((m for m in records if m.startswith("Session ")), "")
+        check("close_pair logs one summary line with age, reason and bytes per side",
+              "closed after" in summary and "closed by datalogger" in summary
+              and "datalogger sent 20 B" in summary and "server sent nothing" in summary,
               f"messages={records!r}")
     finally:
         proxy_logger.removeHandler(handler)
         proxy_logger.setLevel(old_level)
         proxy.shutdown()
+
+
+def test_stale_session_end_is_expected():
+    """A reset on a session the datalogger already replaced is INFO; a reset of the live one is a WARNING.
+
+    Reproduces the dominant pattern in production logs: the datalogger (e.g. after its
+    daily reboot) opens a new connection without closing the old one, which is then
+    reset minutes later.
+    """
+    srv_ready = threading.Event()
+    conns = []
+
+    def fake_growatt():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", SERVER_PORT + 11))
+        srv.listen(4)
+        srv_ready.set()
+        srv.settimeout(15)
+        try:
+            for _ in range(2):
+                conns.append(srv.accept()[0])
+        except OSError:
+            pass
+        finally:
+            srv.close()
+
+    threading.Thread(target=fake_growatt, daemon=True).start()
+    srv_ready.wait(10)
+
+    conf = make_conf(grottport=PROXY_PORT + 11, growattport=SERVER_PORT + 11)
+    proxy = Proxy(conf)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    records = []
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            records.append((record.levelno, record.getMessage()))
+
+    handler = Handler()
+    proxy_logger = logging.getLogger("grottproxy")
+    old_level = proxy_logger.level
+    proxy_logger.setLevel(logging.INFO)
+    proxy_logger.addHandler(handler)
+    rst = struct.pack("ii", 1, 0)  # SO_LINGER 0: close() aborts the connection with a RST.
+    try:
+        old = socket.create_connection(("127.0.0.1", PROXY_PORT + 11), timeout=10)
+        old.sendall(make_record(0x81, rectype=0x16, total_len=20))
+        wait_for(lambda: len(proxy.channel) == 2)
+        time.sleep(0.1)
+        new = socket.create_connection(("127.0.0.1", PROXY_PORT + 11), timeout=10)
+        wait_for(lambda: len(proxy.channel) == 4)
+
+        old.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, rst)
+        old.close()
+        wait_for(lambda: len(proxy.channel) == 2)
+        stale = [(lvl, m) for lvl, m in records if "stale, datalogger reconnected as" in m]
+        check("reset of a replaced session logged at INFO as stale",
+              len(stale) == 1 and stale[0][0] == logging.INFO, f"records={records!r}")
+        check("stale session summary shows what each side sent",
+              bool(stale) and "datalogger sent 20 B" in stale[0][1] and "server sent nothing" in stale[0][1])
+        check("stale session counted as superseded, not as a reset",
+              proxy.stats["superseded"] == 1 and proxy.stats["resets"] == 0, f"stats={proxy.stats}")
+
+        new.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, rst)
+        new.close()
+        wait_for(lambda: not proxy.channel)
+        faults = [(lvl, m) for lvl, m in records if "datalogger error" in m]
+        check("reset of the live session logged at WARNING",
+              len(faults) == 1 and faults[0][0] == logging.WARNING, f"records={records!r}")
+        check("live session reset counted as a reset", proxy.stats["resets"] == 1, f"stats={proxy.stats}")
+    finally:
+        proxy_logger.removeHandler(handler)
+        proxy_logger.setLevel(old_level)
+        proxy.shutdown()
+        for conn in conns:
+            conn.close()
 
 
 def test_timesync():
@@ -712,6 +800,105 @@ def test_mqtt():
     check("MQTT publish fails fast without broker", res2 is False and elapsed < 5, f"{elapsed:.2f}s")
 
 
+def test_mqtt_outage_logged_once():
+    """A broker outage logs one warning (not one per message) and the drop count on reconnect."""
+    port = BROKER_PORT + 2
+    records = []
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            records.append((record.levelno, record.getMessage()))
+
+    handler = Handler()
+    data_logger = logging.getLogger("grottdata")
+    old_level = data_logger.level
+    data_logger.setLevel(logging.INFO)
+    data_logger.addHandler(handler)
+    stop = threading.Event()
+
+    def fake_broker(ready):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", port))
+        srv.listen(1)
+        ready.set()
+        srv.settimeout(10)
+        try:
+            conn, _ = srv.accept()
+            conn.recv(4096)                    # CONNECT
+            conn.sendall(b"\x20\x02\x00\x00")  # CONNACK accepted
+            stop.wait(10)
+            conn.close()
+        except OSError:
+            pass
+        finally:
+            srv.close()
+
+    pub = MQTTPublisher("127.0.0.1", port, "grott-outage", reconnect_min=1, reconnect_max=1)
+    try:
+        results = [pub.publish("t", "x", timeout=0.3) for _ in range(3)]
+        warnings = [m for lvl, m in records if lvl == logging.WARNING and "not connected" in m]
+        check("MQTT outage: every message dropped, a single warning logged",
+              results == [False] * 3 and len(warnings) == 1, f"records={records!r}")
+
+        ready = threading.Event()
+        threading.Thread(target=fake_broker, args=(ready,), daemon=True).start()
+        ready.wait(5)
+        reconnected = wait_for(
+            lambda: any("3 message(s) dropped while disconnected" in m for _, m in records), timeout=8
+        )
+        check("MQTT reconnect reports how many messages were dropped", reconnected, f"records={records!r}")
+    finally:
+        stop.set()
+        pub.close()
+        data_logger.removeHandler(handler)
+        data_logger.setLevel(old_level)
+
+
+def test_publish_stats_counters():
+    """The stats line reads delivered and dropped MQTT messages separately, and resets them."""
+    grottdata.take_publish_stats()
+    grottdata._count_publish("published")
+    grottdata._count_publish("dropped")
+    grottdata._count_publish("dropped")
+    check("publish counters report (published, dropped) and reset on read",
+          grottdata.take_publish_stats() == (1, 2) and grottdata.take_publish_stats() == (0, 0))
+
+
+def test_sigterm_clean_shutdown():
+    """SIGTERM (service stop/restart) shuts down cleanly and says so in the log."""
+    repo = Path(__file__).resolve().parent.parent
+    with tempfile.TemporaryDirectory() as tmp:
+        # noforward: the readiness probe below must never reach the real Growatt server.
+        Path(tmp, "grott.ini").write_text(
+            f"[Generic]\ngrottip = 127.0.0.1\ngrottport = {PROXY_PORT + 12}\n"
+            "[Growatt]\nnoforward = True\n[MQTT]\nnomqtt = True\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, str(repo / "grott.py")], cwd=tmp,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            listening = wait_for(lambda: _port_open(PROXY_PORT + 12), timeout=10)
+            proc.send_signal(signal.SIGTERM)
+            out, _ = proc.communicate(timeout=10)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+    check("SIGTERM: proxy was up before the signal", listening)
+    check("SIGTERM: exits cleanly and logs why",
+          proc.returncode == 0 and "stopped by SIGTERM" in out and "Grott proxy stopped" in out,
+          f"rc={proc.returncode} out={out!r}")
+
+
+def _port_open(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 if __name__ == "__main__":
     test_utils()
     test_relay_and_procdata()
@@ -722,11 +909,15 @@ if __name__ == "__main__":
     test_idle_timeout_recycles_zombie_session()
     test_idle_recycle_backoff()
     test_stats_line_and_session_age()
+    test_stale_session_end_is_expected()
     test_timesync()
     test_timesync_response_withheld_from_cloud()
     test_malformed_records_dont_corrupt_stream()
     test_resync_bounded()
     test_mqtt_publish_never_blocks_the_caller()
     test_mqtt()
+    test_mqtt_outage_logged_once()
+    test_publish_stats_counters()
+    test_sigterm_clean_shutdown()
     print("RESULT:", "ALL TESTS PASSED" if not FAILURES else f"FAILED: {FAILURES}")
     sys.exit(1 if FAILURES else 0)

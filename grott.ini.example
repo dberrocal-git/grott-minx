@@ -75,8 +75,10 @@ idletimeout = 300
 ; idlebackoffmax seconds, with +/-20% jitter so the cadence never looks mechanical
 idlebackoffmult = 2.0
 idlebackoffmax = 1800
-; seconds between the periodic stats line in the log (sessions, resets, idle
-; recycles, fallbacks, records, MQTT publishes, blocked commands); 0 disables it
+; seconds between the periodic stats line in the log (sessions, superseded = stale
+; sessions ended after the datalogger reconnected, resets = unexpected connection
+; errors, idle recycles, fallbacks, records, MQTT published/dropped, blocked
+; commands); 0 disables it
 statsinterval = 3600
 ; maximum number of queued, not-yet-accepted incoming connections (listen backlog)
 backlog = 200
