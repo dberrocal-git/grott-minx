@@ -21,34 +21,36 @@ Designed for local resilience and for keeping the cloud's hands off your hardwar
   and a port health check.
 
 ```mermaid
-flowchart LR
+flowchart TB
+    accTitle: grott-minx architecture
+    accDescr: The inverter reaches the ShineLink-X over RF. On the local network the proxy relays the datalogger traffic to the Growatt cloud and publishes decoded data to MQTT and Home Assistant.
+
     subgraph plant["☀️ Solar plant"]
+        direction LR
         SM["🔌 Eastron SDM230"]
         INV["⚡ MIN 6000TL-XH<br/>+ APX battery"]
-        DL["📡 ShineLink-X"]
         SM -- "Modbus" --> INV
-        INV -- "RF" --> DL
     end
 
-    subgraph host["🖥️ Proxy host (LAN)"]
-        P["🛡️ grott-minx<br/>:5279"]
+    subgraph lan["🏠 LAN"]
+        DL["📡 ShineLink-X"]
+        P["🛡️ grott-minx :5279<br/>relay · decode · local ACK"]
+        subgraph home["🏡 Home automation"]
+            direction LR
+            M[("📨 MQTT broker")]
+            HA{{"Home Assistant"}}
+            M --> HA
+        end
     end
 
-    subgraph cloud["☁️ Growatt cloud"]
-        G(["server.growatt.com"])
+    subgraph internet["🌐 Internet"]
+        G(["☁️ server.growatt.com"])
     end
 
-    subgraph home["🏠 Home automation"]
-        M[("📨 MQTT broker")]
-        HA{{"Home Assistant"}}
-        M --> HA
-    end
-
-    DL ==>|"XOR-masked records"| P
-    P ==>|"passthrough"| G
-    G -.->|"ACKs · commands"| P
-    P -.->|"relayed · blockcmd"| DL
-    P ==>|"decoded JSON"| M
+    plant -- "RF" --> DL
+    DL <==>|"records ⇄ ACKs"| P
+    P ==>|"decoded JSON"| home
+    P <==>|"passthrough ⇄<br/>ACKs · commands"| G
 
     classDef device fill:#1f6feb,stroke:#58a6ff,color:#fff,stroke-width:1px
     classDef proxy fill:#238636,stroke:#3fb950,color:#fff,stroke-width:2px
@@ -59,13 +61,14 @@ flowchart LR
     class G cloudn
     class M,HA homen
     style plant fill:transparent,stroke:#58a6ff,stroke-dasharray:4 4
-    style host fill:transparent,stroke:#3fb950,stroke-dasharray:4 4
-    style cloud fill:transparent,stroke:#a371f7,stroke-dasharray:4 4
+    style lan fill:transparent,stroke:#8b949e
     style home fill:transparent,stroke:#f0883e,stroke-dasharray:4 4
-    linkStyle 0,1 stroke:#58a6ff,stroke-width:2px
-    linkStyle 3,4 stroke:#3fb950,stroke-width:3px
-    linkStyle 5,6 stroke:#a371f7,stroke-width:2px
-    linkStyle 2,7 stroke:#f0883e,stroke-width:2px
+    style internet fill:transparent,stroke:#a371f7,stroke-dasharray:4 4
+    %% Link order: 0 SM-INV, 1 M-HA, 2 plant-DL, 3 DL-P, 4 P-home, 5 P-G
+    linkStyle 0,2 stroke:#58a6ff,stroke-width:2px
+    linkStyle 3 stroke:#3fb950,stroke-width:3px
+    linkStyle 1,4 stroke:#f0883e,stroke-width:3px
+    linkStyle 5 stroke:#a371f7,stroke-width:3px
 ```
 
 ## Credits & scope
@@ -127,12 +130,15 @@ a background daemon thread with automatic reconnection and exponential backoff. 
 the broker is unreachable, `publish()` fails fast (bounded by `publishtimeout`) and the
 proxy keeps relaying — an MQTT outage never blocks inverter traffic.
 
-Record lifecycle, including the degraded modes:
+Session and record lifecycle, including the optional and degraded modes:
 
 ```mermaid
 sequenceDiagram
+    accTitle: grott-minx session and record lifecycle
+    accDescr: Session setup with optional clock sync, live records relayed to the cloud and published to MQTT, local acknowledgements while the cloud is down, and remote commands dropped by blockcmd.
+
     autonumber
-    box rgba(31,111,235,0.12) 🏠 Local network
+    box rgba(31,111,235,0.12) 🏠 LAN
         participant DL as 📡 ShineLink-X
         participant PX as 🛡️ grott-minx
         participant MQ as 📨 MQTT broker
@@ -141,25 +147,39 @@ sequenceDiagram
         participant GW as ☁️ Growatt cloud
     end
 
-    DL->>PX: Data record 04 (XOR-masked, CRC16)
-    activate PX
-    alt Growatt reachable — normal proxy mode
-        PX->>GW: Raw passthrough (byte-for-byte)
-        PX->>MQ: Decoded JSON
+    critical Session setup
+        DL->>PX: Announce 03 (serials)
+        PX->>GW: Cloud connection opened, announce relayed
         GW-->>PX: ACK
         PX-->>DL: ACK relayed
-    else Growatt down (offline fallback) or noforward
-        rect rgba(35,134,54,0.15)
-            PX-->>DL: Local ACK crafted by the proxy
-            PX->>MQ: Decoded JSON — metrics keep flowing
+    option Growatt unreachable (offline fallback)
+        PX-->>DL: Local ACK, cloud retried later
+    end
+
+    opt timesync = True
+        PX->>DL: Clock set (type 18, register 31)
+        DL->>PX: Type 18 response
+        Note over PX,GW: ⛔ Withheld: the cloud never sent that command
+    end
+
+    loop Live data: inverter 04, smart meter 20 / 1b
+        DL->>PX: Record (XOR-masked, CRC16)
+        alt Growatt reachable
+            PX->>GW: Relayed byte-for-byte
+            GW-->>PX: ACK
+            PX-->>DL: ACK relayed
+        else Offline fallback or noforward
+            rect rgba(35,134,54,0.15)
+                PX-->>DL: Local ACK crafted by the proxy
+            end
         end
+        PX->>MQ: Decoded JSON → 🏡 Home Assistant
     end
-    deactivate PX
-    opt blockcmd enabled
+
+    opt blockcmd = True
         GW->>PX: Remote register command (05/06/10/18/19)
-        Note over DL,PX: ⛔ Dropped — never reaches the datalogger
+        Note over DL,PX: ⛔ Dropped: never reaches the datalogger
     end
-    Note over MQ: 🏡 Home Assistant sensors update
 ```
 
 ### Protocol notes
