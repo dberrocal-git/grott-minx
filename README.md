@@ -314,11 +314,10 @@ not configuration.
   behaviour (refuse connections, datalogger buffers for the cloud, no local data
   during outages).
 - **`[Growatt] timesync = True`** sets the datalogger clock to the proxy host's time
-  at the start of each session, like the real server does (a type `18` write of
-  register 31, sent once Growatt has answered the announce; in `noforward`/fallback
-  modes right after the local ACK). Useful when the datalogger RTC battery is dead,
-  and the only clock source in `noforward`/fallback modes. The datalogger's response
-  to this injected command (and its undeclared encrypted trailer) is withheld from the
+  right after each session announce, exactly like the real server does (a type `18`
+  write of register 31). Useful when the datalogger RTC battery is dead, and the only
+  clock source in `noforward`/fallback modes. The datalogger's response to this
+  injected command (and its undeclared encrypted trailer) is withheld from the
   Growatt server — the cloud never sent the command, so it never sees the answer.
 - **`[Proxy] idletimeout = 300`** recycles the session when the Growatt-side socket
   has delivered no data for that many seconds (0 disables it). Guards against zombie
@@ -381,15 +380,6 @@ and every `WARNING` deserves a look.
 
 - **MQTT outages** log a single warning when publishing starts failing; the reconnect
   line then reports how many messages were dropped in between.
-- **Unanswered clock syncs** (`timesync`): when a session ends without the datalogger
-  answering the clock set, or without Growatt answering the announce, a `setup trace`
-  line lists the session's first records (who sent what, when) and any bytes left
-  unparsed:
-
-  ```text
-  INFO: Session ('192.168.1.20', 49159) setup trace (clock sync unanswered): +34.1s dl 03/1760B, +34.2s cloud 03/11B, +34.2s proxy 18/63B, +37.9s dl 16/40B
-  ```
-
 - **Stops are logged** as `Grott stopped by SIGTERM`, so a restart in the log is never
   unexplained.
 - **CRC mismatches** name the record type, length and origin; such records are still

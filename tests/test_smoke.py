@@ -58,15 +58,6 @@ def make_record(seq, rectype=0x04, total_len=600, corrupt_crc=False):
     return body + crc.to_bytes(2, "big")
 
 
-def make_announce(loggerid=b"KWK1CK53HV"):
-    """Builds a masked, CRC-valid protocol-06 announce (type 03, 220B) carrying *loggerid*."""
-    payload = loggerid + bytes(200)  # The id sits at decrypted bytes 8..17.
-    datalength = 2 + len(payload)
-    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
-    masked = bytes.fromhex(decrypt(plain))  # XOR is symmetric: plaintext -> wire form.
-    return masked + calc_crc(masked).to_bytes(2, "big")
-
-
 def make_conf(**overrides):
     """Returns a stub configuration object with the attributes the proxy expects."""
     conf = types.SimpleNamespace(
@@ -601,7 +592,11 @@ def test_stale_session_end_is_expected():
 def test_timesync():
     """After an announce the proxy sets the datalogger clock (type 18, register 31)."""
     loggerid = b"KWK1CK53HV"
-    announce = make_announce(loggerid)
+    payload = loggerid + bytes(200)  # The id sits at decrypted bytes 8..17.
+    datalength = 2 + len(payload)
+    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
+    masked = bytes.fromhex(decrypt(plain))  # XOR is symmetric: plaintext -> wire form.
+    announce = masked + calc_crc(masked).to_bytes(2, "big")
 
     conf = make_conf(grottport=PROXY_PORT + 6, noforward=True, timesync=True)
     proxy = Proxy(conf)
@@ -636,21 +631,24 @@ def test_timesync():
 def test_timesync_response_withheld_from_cloud():
     """The datalogger's answer to our injected time command never reaches Growatt.
 
-    The command is held until Growatt has answered the announce, like the real server,
-    and never lands inside a split record. The response (type 18) carries an
-    undeclared encrypted trailer that must be swallowed too, even when it is split
-    across TCP chunks. Everything else on the uplink (announce, data records) keeps
-    flowing to the server.
+    The response (type 18) carries an undeclared encrypted trailer that must be
+    swallowed too, even when it is split across TCP chunks. Everything else on the
+    uplink (announce, data records) keeps flowing to the server.
     """
-    announce = make_announce()
-    cloud_ack = make_record(0x77, rectype=0x03, total_len=11)     # Growatt's answer to the announce
+    loggerid = b"KWK1CK53HV"
+    payload = loggerid + bytes(200)
+    datalength = 2 + len(payload)
+    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
+    masked = bytes.fromhex(decrypt(plain))
+    announce = masked + calc_crc(masked).to_bytes(2, "big")
+
     response18 = make_record(0x0001, rectype=0x18, total_len=43)  # answer to the injected command
     trailer = b"\xff" * 796                                       # its undeclared encrypted trailer
     data_rec = make_record(0x52, rectype=0x04, total_len=600)
     expected_rx = announce + data_rec                             # what the cloud may see
 
     results = {"rx": b""}
-    srv_ready, srv_done, answer = threading.Event(), threading.Event(), threading.Event()
+    srv_ready, srv_done = threading.Event(), threading.Event()
 
     def fake_growatt():
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -662,15 +660,6 @@ def test_timesync_response_withheld_from_cloud():
         conn, _ = srv.accept()
         conn.settimeout(15)
         try:
-            while len(results["rx"]) < len(announce):
-                chunk = conn.recv(4096)
-                if not chunk:
-                    break
-                results["rx"] += chunk
-            answer.wait(10)
-            conn.sendall(cloud_ack[:5])  # The answer split across TCP chunks.
-            time.sleep(0.3)
-            conn.sendall(cloud_ack[5:])
             while len(results["rx"]) < len(expected_rx):
                 chunk = conn.recv(4096)
                 if not chunk:
@@ -693,17 +682,7 @@ def test_timesync_response_withheld_from_cloud():
     client.settimeout(10)
     client.sendall(announce)
     wait_for(lambda: results["rx"], timeout=5)          # announce relayed raw (pre-injection)
-    wait_for(lambda: proxy.pending_timesync, timeout=5)
-    time.sleep(0.2)
-    check("timesync: command held until Growatt answers the announce", not proxy.timesynced)
-    answer.set()
     wait_for(lambda: proxy.timesynced, timeout=5)       # proxy injected the time command
-    downlink = b""
-    while len(downlink) < len(cloud_ack) + 63:
-        downlink += client.recv(4096)
-    check("timesync: datalogger gets Growatt's whole answer first, then the command",
-          downlink[: len(cloud_ack)] == cloud_ack and downlink[len(cloud_ack) + 7] == 0x18,
-          f"downlink={downlink.hex()}")
     client.sendall(response18 + trailer[:400])          # response + first trailer chunk
     time.sleep(0.5)
     client.sendall(trailer[400:] + data_rec)            # rest of trailer, then a live data record
@@ -717,106 +696,6 @@ def test_timesync_response_withheld_from_cloud():
           f"rx={len(results['rx'])}/{len(expected_rx)}")
     check("timesync response squelched exactly once per session",
           len(proxy.squelched) == 0 and len(proxy.swallow_trailer) == 0)  # cleaned up on close
-
-
-def _timesync_trace_session(port, cloud_answers, after_sync):
-    """Runs one timesync session against a fake cloud; returns the proxy's INFO messages."""
-    announce = make_announce()
-    srv_ready = threading.Event()
-
-    def fake_growatt():
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("127.0.0.1", SERVER_PORT + port))
-        srv.listen(1)
-        srv_ready.set()
-        srv.settimeout(15)
-        conn, _ = srv.accept()
-        conn.settimeout(15)
-        try:
-            got = b""
-            while len(got) < len(announce):
-                chunk = conn.recv(4096)
-                if not chunk:
-                    break
-                got += chunk
-            if cloud_answers:
-                conn.sendall(make_record(0x77, rectype=0x03, total_len=11))
-            while conn.recv(4096):
-                pass
-        except OSError:
-            pass
-        finally:
-            conn.close()
-            srv.close()
-
-    threading.Thread(target=fake_growatt, daemon=True).start()
-    srv_ready.wait(10)
-    conf = make_conf(grottport=PROXY_PORT + port, growattport=SERVER_PORT + port, timesync=True)
-    proxy = Proxy(conf)
-    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
-    time.sleep(0.3)
-
-    records = []
-
-    class Handler(logging.Handler):
-        def emit(self, record):
-            records.append(record.getMessage())
-
-    handler = Handler()
-    proxy_logger = logging.getLogger("grottproxy")
-    old_level = proxy_logger.level
-    proxy_logger.setLevel(logging.INFO)
-    proxy_logger.addHandler(handler)
-    try:
-        client = socket.create_connection(("127.0.0.1", PROXY_PORT + port), timeout=10)
-        client.settimeout(1)
-        client.sendall(announce)
-        after_sync(proxy, client)
-        client.close()
-        wait_for(lambda: any("setup trace" in m for m in records), timeout=5)
-    finally:
-        proxy_logger.removeHandler(handler)
-        proxy_logger.setLevel(old_level)
-        proxy.shutdown()
-    return records
-
-
-def test_unanswered_timesync_logs_setup_trace():
-    """A clock sync left unanswered logs the session's first records and any stuck bytes.
-
-    In production ~1 in 5 clock syncs went unanswered and the datalogger dropped the
-    session ~30s later; the trace shows what it sent instead and whether part of a
-    record was stuck in the per-record uplink (never forwarded to Growatt).
-    """
-    def stall_mid_record(proxy, client):
-        wait_for(lambda: proxy.timesynced, timeout=5)
-        client.sendall(make_record(0x53, rectype=0x04, total_len=600)[:20])
-        time.sleep(0.3)
-
-    records = _timesync_trace_session(13, True, stall_mid_record)
-    line = next((m for m in records if "setup trace" in m), "")
-    check("unanswered clock sync logs the setup trace", "clock sync unanswered" in line, f"records={records!r}")
-    check("setup trace lists announce, cloud answer, injected command and the stuck partial record",
-          all(s in line for s in ("dl 03/220B", "cloud 03/11B", "proxy 18/63B", "unparsed: dl 20 B")), line)
-
-
-def test_timesync_held_while_cloud_silent():
-    """No clock set reaches the datalogger before Growatt answers; the trace says so."""
-    got = {}
-
-    def expect_nothing(proxy, client):
-        wait_for(lambda: proxy.pending_timesync, timeout=5)
-        try:
-            got["downlink"] = client.recv(4096)
-        except TimeoutError:
-            got["downlink"] = b""
-
-    records = _timesync_trace_session(14, False, expect_nothing)
-    line = next((m for m in records if "setup trace" in m), "")
-    check("silent cloud: no clock set sent to the datalogger", got.get("downlink") == b"", f"got={got!r}")
-    check("silent cloud: trace says Growatt never answered the announce",
-          "Growatt never answered the announce" in line and "proxy 18" not in line, line)
 
 
 def test_malformed_records_dont_corrupt_stream():
@@ -1033,8 +912,6 @@ if __name__ == "__main__":
     test_stale_session_end_is_expected()
     test_timesync()
     test_timesync_response_withheld_from_cloud()
-    test_unanswered_timesync_logs_setup_trace()
-    test_timesync_held_while_cloud_silent()
     test_malformed_records_dont_corrupt_stream()
     test_resync_bounded()
     test_mqtt_publish_never_blocks_the_caller()
