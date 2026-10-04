@@ -20,6 +20,8 @@ blocked_rectypes = (0x05, 0x06, 0x10, 0x18, 0x19)
 # 0x18 is the datalogger's response to our own timesync command (see build_time_command),
 # 0x19 the response to the server's register read, 0x37 ShineLink slave sub-frames.
 trailer_rectypes = (0x18, 0x19, 0x29, 0x37, 0x38)
+# Records kept per session for the setup trace logged when its clock sync goes unanswered.
+SETUP_TRACE_LEN = 12
 
 
 def xor_peek(data, limit=32):
@@ -241,8 +243,10 @@ class Proxy:
         self.fallback_retry = conf.fallbackretry
         self.timesync = conf.timesync
         self.timesynced = set()  # Datalogger sockets whose clock was already set this session.
+        self.pending_timesync = {}  # Datalogger socket -> [announce record, time, answered by Growatt].
         self.squelched = set()   # Sessions whose timesync response was already withheld from Growatt.
         self.swallow_trailer = set()  # Sockets whose next noise bytes are the withheld response's trailer.
+        self.trace = {}  # Datalogger socket -> first records of its session (see SETUP_TRACE_LEN).
 
         # Operational tuning (grott.ini [Proxy] section).
         self.buffer_size = conf.buffersize
@@ -435,6 +439,7 @@ class Proxy:
         self.born[sock] = now
         self.addr[sock] = addr
         self.rxbytes[sock] = 0
+        self.trace[sock] = []
         self.stats["sessions"] += 1
         self.channel[sock] = None
 
@@ -489,6 +494,7 @@ class Proxy:
             self.born[sock] = now
             self.rxbytes[sock] = 0
         self.addr[clientsock] = clientaddr
+        self.trace[clientsock] = []
         try:
             self.addr[forward] = forward.getpeername()
         except OSError:
@@ -537,6 +543,49 @@ class Proxy:
         if sock in self.channel:
             self.parse_stream(sock, data, conf)
 
+        if sock in self.serverside and peer in self.pending_timesync:
+            self.pending_timesync[peer][2] = True  # Growatt answered the announce.
+        loggersock = peer if sock in self.serverside else sock
+        if loggersock in self.pending_timesync and sock in self.channel:
+            self._release_timesync(loggersock)
+
+    def _release_timesync(self, loggersock):
+        """Sends the held clock set once Growatt answered the announce and no record is mid-flight.
+
+        Like the real server, the command follows the cloud's answer to the announce.
+        Both directions must sit at a record boundary: the command must not land inside
+        a downlink record, and the uplink switches to per-record forwarding, which would
+        re-send the already relayed head of a partial record.
+        """
+        announce, announced, answered = self.pending_timesync[loggersock]
+        serversock = self.channel.get(loggersock)
+        # Local sessions: the downlink only carries the proxy's own whole records.
+        if serversock is not None and (not answered or self.recvbuf.get(loggersock) or self.recvbuf.get(serversock)):
+            return
+        del self.pending_timesync[loggersock]
+        cmd = build_time_command(announce)
+        if cmd:
+            self._send_timesync(loggersock, cmd, announced if serversock is not None else None)
+
+    def _send_timesync(self, sock, cmd, announced=None):
+        """Sends the clock-set command; from then on the datalogger's uplink is forwarded per record."""
+        self.timesynced.add(sock)
+        self._trace(sock, "proxy", f"{cmd[7]:02x}/{len(cmd)}B")
+        self.queue_send(sock, cmd)
+        if announced is None:
+            logger.info("Datalogger clock synchronized to host time (type 18, register 31)")
+        else:
+            logger.info(
+                "Datalogger clock synchronized to host time (type 18, register 31) after Growatt answered "
+                "the announce (+%.2fs)", time.monotonic() - announced,
+            )
+
+    def _trace(self, loggersock, sender, what):
+        """Appends an entry to the session's setup trace while it holds fewer than SETUP_TRACE_LEN."""
+        trace = self.trace.get(loggersock)
+        if trace is not None and len(trace) < SETUP_TRACE_LEN:
+            trace.append(f"+{time.monotonic() - self.born.get(loggersock, time.monotonic()):.1f}s {sender} {what}")
+
     def queue_send(self, sock, data):
         """Queues outbound data and tries to flush immediately."""
         pending = self.sendbuf.get(sock)
@@ -567,6 +616,7 @@ class Proxy:
         """Reassembles complete records: filtering, local ACKs and MQTT processing."""
         buf = self.recvbuf.get(sock, b"") + data
         peer = self.channel.get(sock)
+        loggersock, sender = (peer, "cloud") if sock in self.serverside else (sock, "dl")
         filtering = self.blockcmd and sock in self.serverside and peer is not None
         # A timesynced session forwards its uplink per record: the datalogger answers our
         # injected time command with a type-18 record the cloud never asked for.
@@ -584,6 +634,7 @@ class Proxy:
             if protocol not in known_protocols or datalength == 0 or reclength < 8:
                 nxt = find_next_header(buf)
                 skipped = buf[:nxt] if nxt != -1 else buf
+                self._trace(loggersock, sender, f"noise/{len(skipped)}B")
                 last = self.lastrec.get(sock)
                 if last and last[0] in trailer_rectypes:
                     # Known firmware quirk: these records carry an undeclared encrypted trailer.
@@ -637,6 +688,7 @@ class Proxy:
                 # CRC16-Modbus trailer (protocols 05/06 only).
                 crc_ok = protocol not in (0x05, 0x06) or calc_crc(record[:-2]) == int.from_bytes(record[-2:], "big")
                 rectype = record[7]
+                self._trace(loggersock, sender, f"{rectype:02x}/{reclength}B" + ("" if crc_ok else " bad-crc"))
 
                 if perrecord:
                     if filtering and crc_ok and rectype in blocked_rectypes:
@@ -669,12 +721,13 @@ class Proxy:
                         if sock not in self.channel:
                             return  # Connection closed while queueing.
 
-                if self.timesync and rectype == 0x03 and sock not in self.serverside and sock not in self.timesynced:
-                    cmd = build_time_command(record)
-                    if cmd:
-                        self.timesynced.add(sock)
-                        self.queue_send(sock, cmd)
-                        logger.info("Datalogger clock synchronized to host time (type 18, register 31)")
+                if (self.timesync and rectype == 0x03 and sock not in self.serverside
+                        and sock not in self.timesynced and sock not in self.pending_timesync):
+                    # Local mode: right behind the local ACK queued above. Proxy mode: held until
+                    # Growatt answers the announce (see _release_timesync).
+                    self.pending_timesync[sock] = [record, time.monotonic(), False]
+                    if localmode:
+                        self._release_timesync(sock)
                         if sock not in self.channel:
                             return
             except Exception:
@@ -736,6 +789,24 @@ class Proxy:
                 level, "Session %s closed after %ds (%s): %s",
                 self.addr.get(loggersock), int(now - self.born.get(loggersock, now)), reason, ", ".join(sides),
             )
+            if self.timesync and serversock is not None and loggersock not in self.squelched and self.trace.get(loggersock):
+                pending = self.pending_timesync.get(loggersock)
+                if loggersock in self.timesynced:
+                    state = "clock sync unanswered"
+                elif pending and not pending[2]:
+                    state = "Growatt never answered the announce"
+                elif pending:
+                    state = "clock sync held, stream never at a record boundary"
+                else:
+                    state = "no announce"
+                unparsed = [
+                    f"{label} {len(self.recvbuf[s])} B ({self.recvbuf[s][:8].hex()})"
+                    for label, s in (("dl", loggersock), ("cloud", serversock)) if self.recvbuf.get(s)
+                ]
+                logger.info(
+                    "Session %s setup trace (%s): %s%s", self.addr.get(loggersock), state,
+                    ", ".join(self.trace[loggersock]), f"; unparsed: {', '.join(unparsed)}" if unparsed else "",
+                )
 
         for s in (sock, peer):
             if s is None:
@@ -752,8 +823,10 @@ class Proxy:
             self.addr.pop(s, None)
             self.rxbytes.pop(s, None)
             self.timesynced.discard(s)
+            self.pending_timesync.pop(s, None)
             self.squelched.discard(s)
             self.swallow_trailer.discard(s)
+            self.trace.pop(s, None)
             try:
                 s.close()
             except OSError:
