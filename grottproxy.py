@@ -5,6 +5,7 @@ import random
 import select
 import socket
 import time
+from collections import deque
 from datetime import datetime
 from signal import SIG_DFL, SIGPIPE, signal
 
@@ -20,6 +21,9 @@ blocked_rectypes = (0x05, 0x06, 0x10, 0x18, 0x19)
 # 0x18 is the datalogger's response to our own timesync command (see build_time_command),
 # 0x19 the response to the server's register read, 0x37 ShineLink slave sub-frames.
 trailer_rectypes = (0x18, 0x19, 0x29, 0x37, 0x38)
+# Setup-trace window logged when a clock sync goes unanswered: last records before it, first after it.
+TRACE_BEFORE = 8
+TRACE_AFTER = 12
 
 
 def xor_peek(data, limit=32):
@@ -243,6 +247,7 @@ class Proxy:
         self.timesynced = set()  # Datalogger sockets whose clock was already set this session.
         self.squelched = set()   # Sessions whose timesync response was already withheld from Growatt.
         self.swallow_trailer = set()  # Sockets whose next noise bytes are the withheld response's trailer.
+        self.trace = {}  # Datalogger socket -> (records before the clock sync, records after it).
 
         # Operational tuning (grott.ini [Proxy] section).
         self.buffer_size = conf.buffersize
@@ -489,6 +494,8 @@ class Proxy:
             self.born[sock] = now
             self.rxbytes[sock] = 0
         self.addr[clientsock] = clientaddr
+        if self.timesync:
+            self.trace[clientsock] = (deque(maxlen=TRACE_BEFORE), [])
         try:
             self.addr[forward] = forward.getpeername()
         except OSError:
@@ -537,6 +544,15 @@ class Proxy:
         if sock in self.channel:
             self.parse_stream(sock, data, conf)
 
+    def _trace(self, loggersock, sender, what):
+        """Adds a setup-trace entry: rolling before the clock sync, only the first TRACE_AFTER after it."""
+        before, after = self.trace[loggersock]
+        entry = f"+{time.monotonic() - self.born.get(loggersock, time.monotonic()):.1f}s {sender} {what}"
+        if loggersock not in self.timesynced:
+            before.append(entry)
+        elif len(after) < TRACE_AFTER:
+            after.append(entry)
+
     def queue_send(self, sock, data):
         """Queues outbound data and tries to flush immediately."""
         pending = self.sendbuf.get(sock)
@@ -567,6 +583,7 @@ class Proxy:
         """Reassembles complete records: filtering, local ACKs and MQTT processing."""
         buf = self.recvbuf.get(sock, b"") + data
         peer = self.channel.get(sock)
+        loggersock, sender = (peer, "cloud") if sock in self.serverside else (sock, "dl")
         filtering = self.blockcmd and sock in self.serverside and peer is not None
         # A timesynced session forwards its uplink per record: the datalogger answers our
         # injected time command with a type-18 record the cloud never asked for.
@@ -584,6 +601,8 @@ class Proxy:
             if protocol not in known_protocols or datalength == 0 or reclength < 8:
                 nxt = find_next_header(buf)
                 skipped = buf[:nxt] if nxt != -1 else buf
+                if loggersock in self.trace:
+                    self._trace(loggersock, sender, f"noise/{len(skipped)}B")
                 last = self.lastrec.get(sock)
                 if last and last[0] in trailer_rectypes:
                     # Known firmware quirk: these records carry an undeclared encrypted trailer.
@@ -637,6 +656,8 @@ class Proxy:
                 # CRC16-Modbus trailer (protocols 05/06 only).
                 crc_ok = protocol not in (0x05, 0x06) or calc_crc(record[:-2]) == int.from_bytes(record[-2:], "big")
                 rectype = record[7]
+                if loggersock in self.trace:
+                    self._trace(loggersock, sender, f"{rectype:02x}/{reclength}B" + ("" if crc_ok else " bad-crc"))
 
                 if perrecord:
                     if filtering and crc_ok and rectype in blocked_rectypes:
@@ -649,6 +670,7 @@ class Proxy:
                         # inject exactly one command per session.
                         self.squelched.add(sock)
                         self.swallow_trailer.add(sock)
+                        self.trace.pop(sock, None)  # Answered: nothing to diagnose.
                         logger.info("Withheld timesync response (type 18) from the Growatt server")
                         continue
                     self.queue_send(peer, record)
@@ -673,6 +695,8 @@ class Proxy:
                     cmd = build_time_command(record)
                     if cmd:
                         self.timesynced.add(sock)
+                        if sock in self.trace:
+                            self._trace(sock, "proxy", f"{cmd[7]:02x}/{len(cmd)}B")
                         self.queue_send(sock, cmd)
                         logger.info("Datalogger clock synchronized to host time (type 18, register 31)")
                         if sock not in self.channel:
@@ -736,6 +760,18 @@ class Proxy:
                 level, "Session %s closed after %ds (%s): %s",
                 self.addr.get(loggersock), int(now - self.born.get(loggersock, now)), reason, ", ".join(sides),
             )
+            if serversock is not None and loggersock in self.trace and self.trace[loggersock][0]:
+                before, after = self.trace[loggersock]
+                unparsed = [
+                    f"{label} {len(self.recvbuf[s])} B ({self.recvbuf[s][:8].hex()})"
+                    for label, s in (("dl", loggersock), ("cloud", serversock)) if self.recvbuf.get(s)
+                ]
+                logger.info(
+                    "Session %s setup trace (%s): %s | %s%s", self.addr.get(loggersock),
+                    "clock sync unanswered" if loggersock in self.timesynced else "no announce",
+                    ", ".join(before), ", ".join(after) or "-",
+                    f"; unparsed: {', '.join(unparsed)}" if unparsed else "",
+                )
 
         for s in (sock, peer):
             if s is None:
@@ -754,6 +790,7 @@ class Proxy:
             self.timesynced.discard(s)
             self.squelched.discard(s)
             self.swallow_trailer.discard(s)
+            self.trace.pop(s, None)
             try:
                 s.close()
             except OSError:

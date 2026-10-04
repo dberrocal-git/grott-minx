@@ -380,6 +380,15 @@ and every `WARNING` deserves a look.
 
 - **MQTT outages** log a single warning when publishing starts failing; the reconnect
   line then reports how many messages were dropped in between.
+- **Unanswered clock syncs** (`timesync`): when a session ends without the datalogger
+  answering the clock set, or after sending data without ever announcing, a
+  `setup trace` line lists the records just before the clock set and the first ones
+  after it (who sent what, when), plus any bytes left unparsed:
+
+  ```text
+  INFO: Session ('192.168.1.20', 49159) setup trace (clock sync unanswered): +0.0s dl 16/40B, +0.0s cloud 19/44B, +0.0s cloud 16/40B, +0.2s dl 19/47B, +0.4s dl 03/220B | +0.4s proxy 18/63B; unparsed: dl 20 B (0053000602500104)
+  ```
+
 - **Stops are logged** as `Grott stopped by SIGTERM`, so a restart in the log is never
   unexplained.
 - **CRC mismatches** name the record type, length and origin; such records are still

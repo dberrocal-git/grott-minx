@@ -58,6 +58,15 @@ def make_record(seq, rectype=0x04, total_len=600, corrupt_crc=False):
     return body + crc.to_bytes(2, "big")
 
 
+def make_announce(loggerid=b"KWK1CK53HV"):
+    """Builds a masked, CRC-valid protocol-06 announce (type 03, 220B) carrying *loggerid*."""
+    payload = loggerid + bytes(200)  # The id sits at decrypted bytes 8..17.
+    datalength = 2 + len(payload)
+    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
+    masked = bytes.fromhex(decrypt(plain))  # XOR is symmetric: plaintext -> wire form.
+    return masked + calc_crc(masked).to_bytes(2, "big")
+
+
 def make_conf(**overrides):
     """Returns a stub configuration object with the attributes the proxy expects."""
     conf = types.SimpleNamespace(
@@ -592,11 +601,7 @@ def test_stale_session_end_is_expected():
 def test_timesync():
     """After an announce the proxy sets the datalogger clock (type 18, register 31)."""
     loggerid = b"KWK1CK53HV"
-    payload = loggerid + bytes(200)  # The id sits at decrypted bytes 8..17.
-    datalength = 2 + len(payload)
-    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
-    masked = bytes.fromhex(decrypt(plain))  # XOR is symmetric: plaintext -> wire form.
-    announce = masked + calc_crc(masked).to_bytes(2, "big")
+    announce = make_announce(loggerid)
 
     conf = make_conf(grottport=PROXY_PORT + 6, noforward=True, timesync=True)
     proxy = Proxy(conf)
@@ -636,11 +641,7 @@ def test_timesync_response_withheld_from_cloud():
     uplink (announce, data records) keeps flowing to the server.
     """
     loggerid = b"KWK1CK53HV"
-    payload = loggerid + bytes(200)
-    datalength = 2 + len(payload)
-    plain = (0x77).to_bytes(2, "big") + b"\x00\x06" + datalength.to_bytes(2, "big") + b"\x01\x03" + payload
-    masked = bytes.fromhex(decrypt(plain))
-    announce = masked + calc_crc(masked).to_bytes(2, "big")
+    announce = make_announce(loggerid)
 
     response18 = make_record(0x0001, rectype=0x18, total_len=43)  # answer to the injected command
     trailer = b"\xff" * 796                                       # its undeclared encrypted trailer
@@ -696,6 +697,88 @@ def test_timesync_response_withheld_from_cloud():
           f"rx={len(results['rx'])}/{len(expected_rx)}")
     check("timesync response squelched exactly once per session",
           len(proxy.squelched) == 0 and len(proxy.swallow_trailer) == 0)  # cleaned up on close
+    check("answered clock sync leaves no setup trace behind", not proxy.trace)
+
+
+def test_unanswered_timesync_logs_setup_trace():
+    """An unanswered clock sync logs the records around it and any bytes stuck unparsed.
+
+    Mirrors production: ping, the cloud reads datalogger registers (type 19), the
+    datalogger answers, then announces; the clock set injected on the announce gets no
+    type-18 answer and the datalogger drops the session ~30s later. The trace keeps the
+    last records before the clock set and the first ones after it. Timing unchanged.
+    """
+    ping = make_record(0x01, rectype=0x16, total_len=40)
+    srv_ready, answered = threading.Event(), threading.Event()
+
+    def fake_growatt():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", SERVER_PORT + 13))
+        srv.listen(1)
+        srv_ready.set()
+        srv.settimeout(15)
+        conn, _ = srv.accept()
+        conn.settimeout(15)
+        try:
+            got = b""
+            while len(got) < len(ping):
+                got += conn.recv(4096)
+            conn.sendall(make_record(0x02, rectype=0x19, total_len=44) + ping)  # register read + ping echo
+            answered.set()
+            while conn.recv(4096):
+                pass
+        except OSError:
+            pass
+        finally:
+            conn.close()
+            srv.close()
+
+    threading.Thread(target=fake_growatt, daemon=True).start()
+    srv_ready.wait(10)
+    conf = make_conf(grottport=PROXY_PORT + 13, growattport=SERVER_PORT + 13, timesync=True)
+    proxy = Proxy(conf)
+    threading.Thread(target=proxy.main, args=(conf,), daemon=True).start()
+    time.sleep(0.3)
+
+    records = []
+
+    class Handler(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Handler()
+    proxy_logger = logging.getLogger("grottproxy")
+    old_level = proxy_logger.level
+    proxy_logger.setLevel(logging.INFO)
+    proxy_logger.addHandler(handler)
+    try:
+        client = socket.create_connection(("127.0.0.1", PROXY_PORT + 13), timeout=10)
+        client.settimeout(10)
+        client.sendall(ping)
+        answered.wait(5)
+        time.sleep(0.2)
+        client.sendall(make_record(0x02, rectype=0x19, total_len=47))  # answer to the register read
+        time.sleep(0.2)
+        client.sendall(make_announce())
+        wait_for(lambda: proxy.timesynced, timeout=5)
+        client.sendall(make_record(0x53, rectype=0x04, total_len=600)[:20])  # stalls mid-record
+        time.sleep(0.3)
+        client.close()
+        wait_for(lambda: any("setup trace" in m for m in records), timeout=5)
+    finally:
+        proxy_logger.removeHandler(handler)
+        proxy_logger.setLevel(old_level)
+        proxy.shutdown()
+
+    line = next((m for m in records if "setup trace" in m), "")
+    before, _, after = line.partition(" | ")
+    check("unanswered clock sync logs the setup trace", "clock sync unanswered" in line, f"records={records!r}")
+    check("setup trace shows the session start up to the announce, in order",
+          [s in before for s in ("dl 16/40B", "cloud 19/44B", "cloud 16/40B", "dl 19/47B", "dl 03/220B")]
+          == [True] * 5 and before.index("dl 16/40B") < before.index("dl 03/220B"), line)
+    check("setup trace starts its 'after' part with the injected clock set and lists stuck bytes",
+          after.startswith("+") and "proxy 18/63B" in after.split(",")[0] and "unparsed: dl 20 B" in after, line)
 
 
 def test_malformed_records_dont_corrupt_stream():
@@ -912,6 +995,7 @@ if __name__ == "__main__":
     test_stale_session_end_is_expected()
     test_timesync()
     test_timesync_response_withheld_from_cloud()
+    test_unanswered_timesync_logs_setup_trace()
     test_malformed_records_dont_corrupt_stream()
     test_resync_bounded()
     test_mqtt_publish_never_blocks_the_caller()
